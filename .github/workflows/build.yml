@@ -1,0 +1,45 @@
+name: build
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: stupid-game
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: stupid-game.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Linux tools
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y spirv-tools elfkickers libvulkan1 libxcb1
+
+      - name: Windows tools
+        if: runner.os == 'Windows'
+        run: choco install make -y
+
+      - run: make build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stupid-game-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.bin }}
