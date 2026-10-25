@@ -1,0 +1,15 @@
+[package]
+name = "platform"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash = { version = "0.38", default-features = false }
+vulkan-sys = { path = "../vulkan-sys" }
+
+[target.'cfg(unix)'.dependencies]
+xcb-sys = { path = "../xcb-sys" }
+libc = { version = "0.2", default-features = false }
+
+[target.'cfg(windows)'.dependencies]
+win32-sys = { path = "../win32-sys" }

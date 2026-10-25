@@ -2,8 +2,12 @@
 [unstable]
 build-std = ["core", "alloc"]
 
+# A default target keeps the flags below off build scripts and proc-macros.
+# The Makefile overrides it with --target on Windows.
 [build]
 target = "x86_64-unknown-linux-gnu"
+
+[target.x86_64-unknown-linux-gnu]
 rustflags = [
     "-Zlocation-detail=none",
     "-Zfmt-debug=none",
@@ -12,4 +16,16 @@ rustflags = [
     "-C", "link-arg=-Wl,--gc-sections,--build-id=none,-z,norelro",
     "-C", "link-arg=-Wl,-z,nognustack",
     "-C", "link-arg=-Wl,--hash-style=gnu",
+]
+
+# No CRT: custom entry point, kernel32/user32/vulkan-1 via raw-dylib.
+[target.x86_64-pc-windows-msvc]
+rustflags = [
+    "-Zlocation-detail=none",
+    "-Zfmt-debug=none",
+    "-C", "link-arg=/ENTRY:start",
+    "-C", "link-arg=/NODEFAULTLIB",
+    "-C", "link-arg=/SUBSYSTEM:WINDOWS",
+    "-C", "link-arg=/OPT:REF,ICF",
+    "-C", "link-arg=/EMITPDBALTPATH:none",
 ]

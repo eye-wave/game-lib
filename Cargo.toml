@@ -6,15 +6,20 @@ name = "stupid-game"
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace]
+members = ["crates/*"]
+
+[workspace.dependencies]
 ash = { version = "0.38", default-features = false }
-libc = { version = "0.2", default-features = false }
+
+[dependencies]
+ash = { workspace = true }
+platform = { path = "crates/platform" }
+shader = { path = "crates/shader" }
+vulkan-sys = { path = "crates/vulkan-sys" }
 
 [build-dependencies]
-naga = { version = "30", default-features = false, features = [
-  "wgsl-in",
-  "spv-out",
-] }
+shader = { path = "crates/shader", features = ["build"] }
 
 [profile.dev]
 panic = "immediate-abort"

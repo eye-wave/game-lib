@@ -6,46 +6,10 @@ extern crate alloc;
 
 use alloc::vec::Vec;
 use ash::{khr, vk};
-use core::{
-    alloc::{GlobalAlloc, Layout},
-    ffi::{CStr, c_char, c_int, c_void},
-    ptr,
-};
-
-#[link(name = "c")]
-unsafe extern "C" {}
-
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    unsafe { libc::abort() }
-}
-
-struct Malloc;
-
-unsafe impl GlobalAlloc for Malloc {
-    unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        if l.align() <= 16 {
-            libc::malloc(l.size()) as *mut u8
-        } else {
-            let mut p: *mut c_void = ptr::null_mut();
-            libc::posix_memalign(&mut p, l.align(), l.size());
-            p as *mut u8
-        }
-    }
-    unsafe fn dealloc(&self, p: *mut u8, _: Layout) {
-        libc::free(p as *mut c_void)
-    }
-}
-
-#[global_allocator]
-static ALLOC: Malloc = Malloc;
-
-fn die(msg: &CStr) -> ! {
-    unsafe {
-        libc::puts(msg.as_ptr());
-        libc::exit(1)
-    }
-}
+use core::{ffi::CStr, ptr};
+use platform::die;
+use shader::{Align4, include_shader, words};
+use vulkan_sys::*;
 
 trait OrDie<T> {
     fn or_die(self, msg: &CStr) -> T;
@@ -65,174 +29,6 @@ impl<T> OrDie<T> for Option<T> {
             None => die(msg),
         }
     }
-}
-
-type A = *const vk::AllocationCallbacks<'static>;
-const NA: A = ptr::null();
-
-// Direct imports from the loader: ash's Device/Instance tables look up ~200
-// functions by name, we only need these.
-#[link(name = "libvulkan.so.1", kind = "dylib", modifiers = "+verbatim")]
-unsafe extern "system" {
-    fn vkCreateInstance(
-        i: *const vk::InstanceCreateInfo<'_>,
-        a: A,
-        o: *mut vk::Instance,
-    ) -> vk::Result;
-    fn vkCreateXcbSurfaceKHR(
-        i: vk::Instance,
-        c: *const vk::XcbSurfaceCreateInfoKHR<'_>,
-        a: A,
-        o: *mut vk::SurfaceKHR,
-    ) -> vk::Result;
-    fn vkEnumeratePhysicalDevices(
-        i: vk::Instance,
-        n: *mut u32,
-        o: *mut vk::PhysicalDevice,
-    ) -> vk::Result;
-    fn vkGetPhysicalDeviceProperties(p: vk::PhysicalDevice, o: *mut vk::PhysicalDeviceProperties);
-    fn vkGetPhysicalDeviceQueueFamilyProperties(
-        p: vk::PhysicalDevice,
-        n: *mut u32,
-        o: *mut vk::QueueFamilyProperties,
-    );
-    fn vkGetPhysicalDeviceSurfaceSupportKHR(
-        p: vk::PhysicalDevice,
-        q: u32,
-        s: vk::SurfaceKHR,
-        o: *mut vk::Bool32,
-    ) -> vk::Result;
-    fn vkGetPhysicalDeviceSurfaceCapabilitiesKHR(
-        p: vk::PhysicalDevice,
-        s: vk::SurfaceKHR,
-        o: *mut vk::SurfaceCapabilitiesKHR,
-    ) -> vk::Result;
-    fn vkGetPhysicalDeviceSurfaceFormatsKHR(
-        p: vk::PhysicalDevice,
-        s: vk::SurfaceKHR,
-        n: *mut u32,
-        o: *mut vk::SurfaceFormatKHR,
-    ) -> vk::Result;
-    fn vkCreateDevice(
-        p: vk::PhysicalDevice,
-        c: *const vk::DeviceCreateInfo<'_>,
-        a: A,
-        o: *mut vk::Device,
-    ) -> vk::Result;
-    fn vkGetDeviceQueue(d: vk::Device, f: u32, i: u32, o: *mut vk::Queue);
-    fn vkCreateSwapchainKHR(
-        d: vk::Device,
-        c: *const vk::SwapchainCreateInfoKHR<'_>,
-        a: A,
-        o: *mut vk::SwapchainKHR,
-    ) -> vk::Result;
-    fn vkGetSwapchainImagesKHR(
-        d: vk::Device,
-        s: vk::SwapchainKHR,
-        n: *mut u32,
-        o: *mut vk::Image,
-    ) -> vk::Result;
-    fn vkDestroySwapchainKHR(d: vk::Device, s: vk::SwapchainKHR, a: A);
-    fn vkCreateImageView(
-        d: vk::Device,
-        c: *const vk::ImageViewCreateInfo<'_>,
-        a: A,
-        o: *mut vk::ImageView,
-    ) -> vk::Result;
-    fn vkDestroyImageView(d: vk::Device, v: vk::ImageView, a: A);
-    fn vkCreateSemaphore(
-        d: vk::Device,
-        c: *const vk::SemaphoreCreateInfo<'_>,
-        a: A,
-        o: *mut vk::Semaphore,
-    ) -> vk::Result;
-    fn vkDestroySemaphore(d: vk::Device, s: vk::Semaphore, a: A);
-    fn vkCreateFence(
-        d: vk::Device,
-        c: *const vk::FenceCreateInfo<'_>,
-        a: A,
-        o: *mut vk::Fence,
-    ) -> vk::Result;
-    fn vkCreateShaderModule(
-        d: vk::Device,
-        c: *const vk::ShaderModuleCreateInfo<'_>,
-        a: A,
-        o: *mut vk::ShaderModule,
-    ) -> vk::Result;
-    fn vkDestroyShaderModule(d: vk::Device, m: vk::ShaderModule, a: A);
-    fn vkCreatePipelineLayout(
-        d: vk::Device,
-        c: *const vk::PipelineLayoutCreateInfo<'_>,
-        a: A,
-        o: *mut vk::PipelineLayout,
-    ) -> vk::Result;
-    fn vkCreateGraphicsPipelines(
-        d: vk::Device,
-        cache: vk::PipelineCache,
-        n: u32,
-        c: *const vk::GraphicsPipelineCreateInfo<'_>,
-        a: A,
-        o: *mut vk::Pipeline,
-    ) -> vk::Result;
-    fn vkCreateCommandPool(
-        d: vk::Device,
-        c: *const vk::CommandPoolCreateInfo<'_>,
-        a: A,
-        o: *mut vk::CommandPool,
-    ) -> vk::Result;
-    fn vkAllocateCommandBuffers(
-        d: vk::Device,
-        c: *const vk::CommandBufferAllocateInfo<'_>,
-        o: *mut vk::CommandBuffer,
-    ) -> vk::Result;
-    fn vkWaitForFences(
-        d: vk::Device,
-        n: u32,
-        f: *const vk::Fence,
-        all: vk::Bool32,
-        t: u64,
-    ) -> vk::Result;
-    fn vkResetFences(d: vk::Device, n: u32, f: *const vk::Fence) -> vk::Result;
-    fn vkDeviceWaitIdle(d: vk::Device) -> vk::Result;
-    fn vkAcquireNextImageKHR(
-        d: vk::Device,
-        s: vk::SwapchainKHR,
-        t: u64,
-        sem: vk::Semaphore,
-        f: vk::Fence,
-        o: *mut u32,
-    ) -> vk::Result;
-    fn vkResetCommandBuffer(c: vk::CommandBuffer, f: vk::CommandBufferResetFlags) -> vk::Result;
-    fn vkBeginCommandBuffer(
-        c: vk::CommandBuffer,
-        i: *const vk::CommandBufferBeginInfo<'_>,
-    ) -> vk::Result;
-    fn vkEndCommandBuffer(c: vk::CommandBuffer) -> vk::Result;
-    fn vkCmdPipelineBarrier(
-        c: vk::CommandBuffer,
-        s: vk::PipelineStageFlags,
-        d: vk::PipelineStageFlags,
-        f: vk::DependencyFlags,
-        nm: u32,
-        m: *const vk::MemoryBarrier<'_>,
-        nb: u32,
-        b: *const vk::BufferMemoryBarrier<'_>,
-        ni: u32,
-        i: *const vk::ImageMemoryBarrier<'_>,
-    );
-    fn vkCmdBeginRendering(c: vk::CommandBuffer, i: *const vk::RenderingInfo<'_>);
-    fn vkCmdEndRendering(c: vk::CommandBuffer);
-    fn vkCmdBindPipeline(c: vk::CommandBuffer, bp: vk::PipelineBindPoint, p: vk::Pipeline);
-    fn vkCmdSetViewport(c: vk::CommandBuffer, first: u32, n: u32, v: *const vk::Viewport);
-    fn vkCmdSetScissor(c: vk::CommandBuffer, first: u32, n: u32, r: *const vk::Rect2D);
-    fn vkCmdDraw(c: vk::CommandBuffer, v: u32, i: u32, fv: u32, fi: u32);
-    fn vkQueueSubmit(
-        q: vk::Queue,
-        n: u32,
-        s: *const vk::SubmitInfo<'_>,
-        f: vk::Fence,
-    ) -> vk::Result;
-    fn vkQueuePresentKHR(q: vk::Queue, i: *const vk::PresentInfoKHR<'_>) -> vk::Result;
 }
 
 unsafe fn ck(r: vk::Result, m: &CStr) {
@@ -257,128 +53,7 @@ unsafe fn list<T: Default + Clone>(f: impl Fn(*mut u32, *mut T)) -> Vec<T> {
     v
 }
 
-type Conn = c_void;
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct Cookie {
-    sequence: u32,
-}
-#[repr(C)]
-struct Screen {
-    root: u32,
-}
-#[repr(C)]
-struct ScreenIter {
-    data: *const Screen,
-    rem: c_int,
-    index: c_int,
-}
-#[repr(C)]
-struct AtomReply {
-    response_type: u8,
-    pad0: u8,
-    sequence: u16,
-    length: u32,
-    atom: u32,
-}
-#[repr(C)]
-struct Event {
-    response_type: u8,
-    detail: u8,
-    sequence: u16,
-}
-#[repr(C)]
-struct ClientMsg {
-    response_type: u8,
-    format: u8,
-    sequence: u16,
-    window: u32,
-    type_: u32,
-    data: [u32; 5],
-}
-
-#[link(name = "libxcb.so.1", kind = "dylib", modifiers = "+verbatim")]
-unsafe extern "C" {
-    fn xcb_connect(display: *const c_char, screen: *mut c_int) -> *mut Conn;
-    fn xcb_connection_has_error(c: *mut Conn) -> c_int;
-    fn xcb_get_setup(c: *mut Conn) -> *const c_void;
-    fn xcb_setup_roots_iterator(setup: *const c_void) -> ScreenIter;
-    fn xcb_generate_id(c: *mut Conn) -> u32;
-    fn xcb_create_window(
-        c: *mut Conn,
-        depth: u8,
-        wid: u32,
-        parent: u32,
-        x: i16,
-        y: i16,
-        width: u16,
-        height: u16,
-        border_width: u16,
-        class: u16,
-        visual: u32,
-        value_mask: u32,
-        value_list: *const c_void,
-    ) -> Cookie;
-    fn xcb_change_property(
-        c: *mut Conn,
-        mode: u8,
-        window: u32,
-        property: u32,
-        type_: u32,
-        format: u8,
-        data_len: u32,
-        data: *const c_void,
-    ) -> Cookie;
-    fn xcb_intern_atom(c: *mut Conn, only_if_exists: u8, len: u16, name: *const c_char) -> Cookie;
-    fn xcb_intern_atom_reply(c: *mut Conn, cookie: Cookie, err: *mut *mut c_void)
-    -> *mut AtomReply;
-    fn xcb_map_window(c: *mut Conn, window: u32) -> Cookie;
-    fn xcb_flush(c: *mut Conn) -> c_int;
-    fn xcb_poll_for_event(c: *mut Conn) -> *mut Event;
-}
-
-const XCB_CW_EVENT_MASK: u32 = 0x800;
-const XCB_EVENT_MASK_KEY_PRESS: u32 = 1;
-const XCB_EVENT_MASK_STRUCTURE_NOTIFY: u32 = 1 << 17;
-const XCB_KEY_PRESS: u8 = 2;
-const XCB_CONFIGURE_NOTIFY: u8 = 22;
-const XCB_CLIENT_MESSAGE: u8 = 33;
-const XCB_ATOM_ATOM: u32 = 4;
-const XCB_ATOM_STRING: u32 = 31;
-const XCB_ATOM_WM_NAME: u32 = 39;
-const KEYCODE_ESCAPE: u8 = 9;
-
-unsafe fn intern(c: *mut Conn, name: &str) -> u32 {
-    let ck = xcb_intern_atom(c, 0, name.len() as u16, name.as_ptr() as *const c_char);
-    let r = xcb_intern_atom_reply(c, ck, ptr::null_mut());
-    if r.is_null() {
-        die(c"xcb_intern_atom failed");
-    }
-    let atom = (*r).atom;
-    libc::free(r as *mut c_void);
-    atom
-}
-
-#[repr(C, align(4))]
-struct Align4<T: ?Sized>(T);
-
-macro_rules! include_shader {
-    ($name:literal) => {
-        &Align4(*include_bytes!(concat!(
-            env!("OUT_DIR"),
-            "/",
-            $name,
-            ".spv"
-        )))
-    };
-}
-
 static SPV: &Align4<[u8]> = include_shader!("tri");
-
-fn words(b: &'static Align4<[u8]>) -> &'static [u32] {
-    unsafe { core::slice::from_raw_parts(b.0.as_ptr() as *const u32, b.0.len() / 4) }
-}
 
 unsafe fn shader_module(d: vk::Device, spv: &'static Align4<[u8]>) -> vk::ShaderModule {
     mk(c"create_shader_module failed", |p| {
@@ -553,74 +228,11 @@ unsafe fn transition(
     );
 }
 
-/// C entry point, called once by libc's startup code.
-///
-/// # Safety
-///
-/// Must only be called by the C runtime as the process entry point, at most
-/// once. `_argc` and `_argv` are ignored, so they may be anything. The caller
-/// must provide a working libc, X server (`DISPLAY`) and Vulkan 1.3 driver;
-/// the function terminates the process via `die` when one of them is missing
-/// rather than returning an error.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn main(_argc: c_int, _argv: *const *const c_char) -> c_int {
-    unsafe { run() };
-    0
-}
-
 unsafe fn run() {
-    let conn = xcb_connect(ptr::null(), ptr::null_mut());
-    if conn.is_null() || xcb_connection_has_error(conn) != 0 {
-        die(c"cannot connect to X server (is DISPLAY set?)");
-    }
-    let root = (*xcb_setup_roots_iterator(xcb_get_setup(conn)).data).root;
-
-    let win = xcb_generate_id(conn);
-    let event_mask = [XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_STRUCTURE_NOTIFY];
-    xcb_create_window(
-        conn,
-        0,
-        win,
-        root,
-        0,
-        0,
-        WIDTH,
-        HEIGHT,
-        0,
-        1,
-        0,
-        XCB_CW_EVENT_MASK,
-        event_mask.as_ptr() as *const c_void,
-    );
-
-    let title = b"Vulkan triangle";
-    xcb_change_property(
-        conn,
-        0,
-        win,
-        XCB_ATOM_WM_NAME,
-        XCB_ATOM_STRING,
-        8,
-        title.len() as u32,
-        title.as_ptr() as *const c_void,
-    );
-    let wm_protocols = intern(conn, "WM_PROTOCOLS");
-    let wm_delete = intern(conn, "WM_DELETE_WINDOW");
-    xcb_change_property(
-        conn,
-        0,
-        win,
-        wm_protocols,
-        XCB_ATOM_ATOM,
-        32,
-        1,
-        &wm_delete as *const u32 as *const c_void,
-    );
-    xcb_map_window(conn, win);
-    xcb_flush(conn);
+    let w = platform::open(WIDTH, HEIGHT, c"Vulkan triangle");
 
     let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
-    let inst_exts = [khr::surface::NAME.as_ptr(), khr::xcb_surface::NAME.as_ptr()];
+    let inst_exts = [khr::surface::NAME.as_ptr(), platform::SURFACE_EXT.as_ptr()];
     let instance: vk::Instance = mk(c"create_instance failed (no Vulkan driver?)", |p| {
         vkCreateInstance(
             &vk::InstanceCreateInfo::default()
@@ -631,16 +243,7 @@ unsafe fn run() {
         )
     });
 
-    let surface: vk::SurfaceKHR = mk(c"create_xcb_surface failed", |p| {
-        vkCreateXcbSurfaceKHR(
-            instance,
-            &vk::XcbSurfaceCreateInfoKHR::default()
-                .connection(conn as *mut _)
-                .window(win),
-            NA,
-            p,
-        )
-    });
+    let surface = platform::surface(instance, &w);
 
     let (phys, qf) = list(|n, p| {
         ck(
@@ -794,31 +397,11 @@ unsafe fn run() {
         })
     });
 
-    let mut running = true;
     let mut resized = false;
     let mut frame = 0usize;
 
-    while running {
-        loop {
-            let e = xcb_poll_for_event(conn);
-            if e.is_null() {
-                break;
-            }
-            match (*e).response_type & 0x7f {
-                XCB_CLIENT_MESSAGE => {
-                    if (*(e as *const ClientMsg)).data[0] == wm_delete {
-                        running = false;
-                    }
-                }
-                XCB_CONFIGURE_NOTIFY => resized = true,
-                XCB_KEY_PRESS if (*e).detail == KEYCODE_ESCAPE => {
-                    running = false;
-                }
-                _ => {}
-            }
-            libc::free(e as *mut c_void);
-        }
-        if !running {
+    loop {
+        if !platform::poll(&w, &mut resized) {
             break;
         }
 
@@ -982,3 +565,5 @@ unsafe fn run() {
 
     // no teardown, the OS reclaims everything on exit
 }
+
+platform::entry!(run);

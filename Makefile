@@ -1,8 +1,18 @@
 .PHONY: build
 
-TARGET := target/x86_64-unknown-linux-gnu/release/stupid-game
+ifeq ($(OS),Windows_NT)
+TARGET := x86_64-pc-windows-msvc
+BIN := target/$(TARGET)/release/stupid-game.exe
+# no CRT on Windows, so memcpy/memset come from compiler_builtins
+EXTRA := -Zbuild-std-features=compiler-builtins-mem
+else
+TARGET := x86_64-unknown-linux-gnu
+BIN := target/$(TARGET)/release/stupid-game
+endif
 
 build:
-	cargo build --release
-	-strip --strip-unneeded -R .comment -R .eh_frame -R .eh_frame_hdr $(TARGET) 2>/dev/null || true
-	-sstrip $(TARGET)
+	cargo build --release --target $(TARGET) $(EXTRA)
+ifneq ($(OS),Windows_NT)
+	-strip --strip-unneeded -R .comment -R .eh_frame -R .eh_frame_hdr $(BIN) 2>/dev/null || true
+	-sstrip $(BIN)
+endif
