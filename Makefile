@@ -3,7 +3,6 @@
 ifeq ($(OS),Windows_NT)
 TARGET := x86_64-pc-windows-msvc
 BIN := target/$(TARGET)/release/stupid-game.exe
-# no CRT on Windows, so memcpy/memset come from compiler_builtins
 EXTRA := -Zbuild-std-features=compiler-builtins-mem
 else
 TARGET := x86_64-unknown-linux-gnu
