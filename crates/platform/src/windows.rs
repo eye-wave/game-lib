@@ -50,10 +50,17 @@ pub struct Window {
 }
 
 static RESIZED: AtomicBool = AtomicBool::new(false);
+static CLOSED: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "system" fn wndproc(h: isize, m: u32, w: usize, l: isize) -> isize {
-    if m == WM_SIZE {
-        RESIZED.store(true, Relaxed);
+    match m {
+        WM_SIZE => RESIZED.store(true, Relaxed),
+        // WM_CLOSE is sent, not posted, so poll never sees it; don't let DefWindowProc destroy the window
+        WM_CLOSE => {
+            CLOSED.store(true, Relaxed);
+            return 0;
+        }
+        _ => {}
     }
     DefWindowProcA(h, m, w, l)
 }
@@ -113,10 +120,13 @@ pub unsafe fn poll(w: &Window, resized: &mut bool) -> bool {
     loop {
         let mut m: Msg = core::mem::zeroed();
         while PeekMessageA(&mut m, 0, 0, 0, PM_REMOVE) != 0 {
-            if m.message == WM_CLOSE || (m.message == WM_KEYDOWN && m.wparam == VK_ESCAPE) {
+            if m.message == WM_KEYDOWN && m.wparam == VK_ESCAPE {
                 return false;
             }
             DispatchMessageA(&m);
+        }
+        if CLOSED.load(Relaxed) {
+            return false;
         }
         if IsIconic(w.hwnd) == 0 {
             break;
