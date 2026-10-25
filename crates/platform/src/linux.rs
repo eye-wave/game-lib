@@ -106,13 +106,17 @@ pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
         1,
         &wm_delete as *const u32 as *const c_void,
     );
-    xcb_map_window(conn, win);
-    xcb_flush(conn);
     Window {
         conn,
         win,
         wm_delete,
     }
+}
+
+/// Windows start unmapped (an unpainted window during Vulkan init looks like a hang); call once the first frame is queued.
+pub unsafe fn show(w: &Window) {
+    xcb_map_window(w.conn, w.win);
+    xcb_flush(w.conn);
 }
 
 pub unsafe fn surface(instance: vk::Instance, w: &Window) -> vk::SurfaceKHR {

@@ -35,7 +35,8 @@ pub const WM_CLOSE: u32 = 0x10;
 pub const WM_KEYDOWN: u32 = 0x100;
 pub const VK_ESCAPE: usize = 0x1B;
 pub const PM_REMOVE: u32 = 1;
-pub const WS_OVERLAPPEDWINDOW_VISIBLE: u32 = 0x10CF_0000;
+pub const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
+pub const SW_SHOW: i32 = 5;
 pub const CW_USEDEFAULT: i32 = i32::MIN;
 pub const MB_ICONERROR: u32 = 0x10;
 
@@ -65,6 +66,7 @@ unsafe extern "system" {
         instance: isize,
         param: *const c_void,
     ) -> isize;
+    pub fn ShowWindow(h: isize, cmd: i32) -> i32;
     pub fn DefWindowProcA(h: isize, m: u32, w: usize, l: isize) -> isize;
     pub fn PeekMessageA(m: *mut Msg, h: isize, min: u32, max: u32, remove: u32) -> i32;
     pub fn DispatchMessageA(m: *const Msg) -> isize;

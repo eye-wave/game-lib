@@ -51,15 +51,26 @@ fn compile(path: &std::path::Path, name: &std::path::Path) {
     fs::create_dir_all(dst.parent().unwrap()).unwrap();
     let src = fs::read_to_string(path).unwrap();
 
-    let module = naga::front::wgsl::parse_str(&src)
-        .unwrap_or_else(|e| panic!("{}: WGSL parse error:\n{}", path.display(), e.emit_to_string(&src)));
+    let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| {
+        panic!(
+            "{}: WGSL parse error:\n{}",
+            path.display(),
+            e.emit_to_string(&src)
+        )
+    });
 
     let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::empty(),
     )
     .validate(&module)
-    .unwrap_or_else(|e| panic!("{}: WGSL validation error:\n{}", path.display(), e.emit_to_string(&src)));
+    .unwrap_or_else(|e| {
+        panic!(
+            "{}: WGSL validation error:\n{}",
+            path.display(),
+            e.emit_to_string(&src)
+        )
+    });
 
     let words =
         naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None)

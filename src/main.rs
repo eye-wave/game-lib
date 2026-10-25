@@ -398,6 +398,7 @@ unsafe fn run() {
     });
 
     let mut resized = false;
+    let mut shown = false;
     let mut frame = 0usize;
 
     loop {
@@ -558,6 +559,11 @@ unsafe fn run() {
             vk::Result::SUCCESS => {}
             vk::Result::SUBOPTIMAL_KHR | vk::Result::ERROR_OUT_OF_DATE_KHR => resized = true,
             _ => die(c"queue_present failed"),
+        }
+
+        if !shown {
+            platform::show(&w);
+            shown = true;
         }
 
         frame = (frame + 1) % FRAMES;

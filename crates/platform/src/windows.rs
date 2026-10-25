@@ -86,7 +86,7 @@ pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
         0,
         c"w".as_ptr(),
         title.as_ptr(),
-        WS_OVERLAPPEDWINDOW_VISIBLE,
+        WS_OVERLAPPEDWINDOW,
         CW_USEDEFAULT,
         CW_USEDEFAULT,
         width as i32,
@@ -100,6 +100,11 @@ pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
         die(c"CreateWindow failed");
     }
     Window { hinstance, hwnd }
+}
+
+/// Windows start hidden (an unpainted window during Vulkan init looks like a white hang); call once the first frame is queued.
+pub unsafe fn show(w: &Window) {
+    ShowWindow(w.hwnd, SW_SHOW);
 }
 
 pub unsafe fn surface(instance: vk::Instance, w: &Window) -> vk::SurfaceKHR {
