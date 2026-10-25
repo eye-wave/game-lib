@@ -1,3 +1,3 @@
 fn main() {
-    shader::build("src/tri.wgsl");
+    shader::build("src");
 }
