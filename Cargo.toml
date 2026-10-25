@@ -1,0 +1,31 @@
+
+cargo-features = ["profile-rustflags", "panic-immediate-abort"]
+
+[package]
+name = "stupid-game"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ash = { version = "0.38", default-features = false }
+libc = { version = "0.2", default-features = false }
+
+[build-dependencies]
+naga = { version = "30", default-features = false, features = [
+  "wgsl-in",
+  "spv-out",
+] }
+
+[profile.dev]
+panic = "immediate-abort"
+
+[profile.release]
+opt-level = "s"
+codegen-units = 1
+lto = "fat"
+panic = "immediate-abort"
+strip = true
+debug = false
+overflow-checks = false
+trim-paths = "all"
+rustflags = ["-Cdebuginfo=0", "-Zthreads=8"]

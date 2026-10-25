@@ -1,0 +1,15 @@
+
+[unstable]
+build-std = ["core", "alloc"]
+
+[build]
+target = "x86_64-unknown-linux-gnu"
+rustflags = [
+    "-Zlocation-detail=none",
+    "-Zfmt-debug=none",
+    "-C", "relocation-model=static",
+    "-C", "link-arg=-no-pie",
+    "-C", "link-arg=-Wl,--gc-sections,--build-id=none,-z,norelro",
+    "-C", "link-arg=-Wl,-z,nognustack",
+    "-C", "link-arg=-Wl,--hash-style=gnu",
+]
