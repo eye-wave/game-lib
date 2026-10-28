@@ -11,6 +11,7 @@ members = ["crates/*"]
 
 [workspace.dependencies]
 ash = { version = "0.38", default-features = false }
+error-codes = { path = "./crates/error-codes" }
 
 [dependencies]
 ecs = { path = "crates/ecs" }

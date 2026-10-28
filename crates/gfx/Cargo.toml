@@ -1,3 +1,4 @@
+
 [package]
 name = "gfx"
 version = "0.1.0"
@@ -6,6 +7,7 @@ edition = "2024"
 [dependencies]
 ash = { workspace = true }
 ecs = { path = "../ecs" }
+error-codes = { workspace = true }
 platform = { path = "../platform" }
 shader = { path = "../shader" }
 vulkan-sys = { path = "../vulkan-sys" }

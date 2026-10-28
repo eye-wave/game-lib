@@ -16,6 +16,7 @@ use core::{
     ptr, slice,
 };
 use ecs::App;
+use error_codes::prelude::*;
 use platform::{die, input::Keys};
 use shader::{Align4, words};
 use vulkan_sys::*;
@@ -177,7 +178,7 @@ unsafe fn list<T: Default + Clone>(f: impl Fn(*mut u32, *mut T)) -> Vec<T> {
 }
 
 unsafe fn shader_module(d: vk::Device, spv: &'static Align4<[u8]>) -> vk::ShaderModule {
-    mk(c"create_shader_module failed", |p| {
+    mk(CREATE_SHADER_MODULE_FAILED, |p| {
         vkCreateShaderModule(
             d,
             &vk::ShaderModuleCreateInfo::default().code(words(spv)),
@@ -217,12 +218,12 @@ unsafe fn make_swapchain(c: &Ctx, old: vk::SwapchainKHR) -> Swapchain {
     let mut caps = vk::SurfaceCapabilitiesKHR::default();
     ck(
         vkGetPhysicalDeviceSurfaceCapabilitiesKHR(c.phys, c.surface, &mut caps),
-        c"surface capabilities failed",
+        GET_SURFACE_CAPABILITIES_FAILED,
     );
     let formats = list(|n, p| {
         ck(
             vkGetPhysicalDeviceSurfaceFormatsKHR(c.phys, c.surface, n, p),
-            c"surface formats failed",
+            GET_SURFACE_FORMATS_FAILED,
         )
     });
     let fmt = formats
@@ -262,20 +263,20 @@ unsafe fn make_swapchain(c: &Ctx, old: vk::SwapchainKHR) -> Swapchain {
         .clipped(true)
         .old_swapchain(old);
 
-    let handle = mk(c"create_swapchain failed", |p| {
+    let handle = mk(CREATE_SWAPCHAIN_FAILED, |p| {
         vkCreateSwapchainKHR(c.device, &info, NA, p)
     });
     let images = list(|n, p| {
         ck(
             vkGetSwapchainImagesKHR(c.device, handle, n, p),
-            c"get_swapchain_images failed",
+            GET_SWAPCHAIN_IMAGES_FAILED,
         )
     });
 
     let views = images
         .iter()
         .map(|&image| {
-            mk(c"create_image_view failed", |p| {
+            mk(CREATE_IMAGE_VIEW_FAILED, |p| {
                 vkCreateImageView(
                     c.device,
                     &vk::ImageViewCreateInfo::default()
@@ -293,7 +294,7 @@ unsafe fn make_swapchain(c: &Ctx, old: vk::SwapchainKHR) -> Swapchain {
     let render_done = images
         .iter()
         .map(|_| {
-            mk(c"create_semaphore failed", |p| {
+            mk(CREATE_SEMAPHORE_FAILED, |p| {
                 vkCreateSemaphore(c.device, &vk::SemaphoreCreateInfo::default(), NA, p)
             })
         })
@@ -357,7 +358,7 @@ struct GpuMesh {
 // one host-visible buffer + allocation per mesh, never freed. Add staging/suballocation when meshes multiply.
 unsafe fn upload_mesh(c: &Ctx, m: &Mesh) -> GpuMesh {
     let size = m.data.len() as u64;
-    let buf: vk::Buffer = mk(c"create_buffer failed", |p| {
+    let buf: vk::Buffer = mk(CREATE_BUFFER_FAILED, |p| {
         vkCreateBuffer(
             c.device,
             &vk::BufferCreateInfo::default()
@@ -378,8 +379,8 @@ unsafe fn upload_mesh(c: &Ctx, m: &Mesh) -> GpuMesh {
             req.memory_type_bits & (1 << i) != 0
                 && props.memory_types[i as usize].property_flags.contains(want)
         })
-        .or_die(c"no host-visible memory type");
-    let mem: vk::DeviceMemory = mk(c"allocate_memory failed", |p| {
+        .or_die(NO_HOST_VISIBLE_MEMORY_TYPE);
+    let mem: vk::DeviceMemory = mk(ALLOCATE_MEMORY_FAILED, |p| {
         vkAllocateMemory(
             c.device,
             &vk::MemoryAllocateInfo::default()
@@ -391,7 +392,7 @@ unsafe fn upload_mesh(c: &Ctx, m: &Mesh) -> GpuMesh {
     });
     ck(
         vkBindBufferMemory(c.device, buf, mem, 0),
-        c"bind_buffer_memory failed",
+        BIND_BUFFER_MEMORY_FAILED,
     );
     let mut dst: *mut c_void = ptr::null_mut();
     ck(
@@ -403,7 +404,7 @@ unsafe fn upload_mesh(c: &Ctx, m: &Mesh) -> GpuMesh {
             vk::MemoryMapFlags::empty(),
             &mut dst,
         ),
-        c"map_memory failed",
+        MAP_MEMORY_FAILED,
     );
     ptr::copy_nonoverlapping(m.data.as_ptr(), dst.cast(), m.data.len());
     GpuMesh {
@@ -424,11 +425,11 @@ unsafe fn make_pipeline(
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
             .module(shader)
-            .name(c"vs_main"),
+            .name(c"v"),
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(shader)
-            .name(c"fs_main"),
+            .name(c"f"),
     ];
 
     let binds = [vk::VertexInputBindingDescription::default()
@@ -449,7 +450,7 @@ unsafe fn make_pipeline(
                 vk::Format::R32G32_SFLOAT => 8,
                 vk::Format::R32G32B32_SFLOAT => 12,
                 vk::Format::R32G32B32A32_SFLOAT => 16,
-                _ => die(c"Material attr format unsupported (add its size in make_pipeline)"),
+                _ => die(MATERIAL_ATTRIBUTE_FORMAT_UNSUPPORTED_ADD_ITS_SIZE_IN_MAKE_PIPELINE),
             };
             a
         })
@@ -499,7 +500,7 @@ unsafe fn make_pipeline(
             NA,
             &mut pipeline,
         ),
-        c"create_graphics_pipelines failed",
+        CREATE_GRAPHICS_PIPELINES_FAILED,
     );
     vkDestroyShaderModule(c.device, shader, NA);
     pipeline
@@ -521,7 +522,7 @@ unsafe fn run(mut app: App, title: &CStr) {
     let w = platform::open(WIDTH, HEIGHT, title);
     let vkapp = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
     let inst_exts = [khr::surface::NAME.as_ptr(), platform::SURFACE_EXT.as_ptr()];
-    let instance: vk::Instance = mk(c"create_instance failed (no Vulkan driver?)", |p| {
+    let instance: vk::Instance = mk(CREATE_VULKAN_INSTANCE_FAILED_NO_DRIVER, |p| {
         vkCreateInstance(
             &vk::InstanceCreateInfo::default()
                 .application_info(&vkapp)
@@ -536,7 +537,7 @@ unsafe fn run(mut app: App, title: &CStr) {
     let (phys, qf) = list(|n, p| {
         ck(
             vkEnumeratePhysicalDevices(instance, n, p),
-            c"enumerate_physical_devices failed",
+            ENUMERATE_PHYSICAL_DEVICES_FAILED,
         )
     })
     .into_iter()
@@ -554,7 +555,7 @@ unsafe fn run(mut app: App, title: &CStr) {
                 .then_some((p, i as u32))
         })
     })
-    .or_die(c"no Vulkan 1.3 GPU that can present to this window");
+    .or_die(NO_VULKAN_1_3_GPU_THAT_CAN_PRESENT_TO_THIS_WINDOW);
 
     let prio = [1.0f32];
     let queue_info = [vk::DeviceQueueCreateInfo::default()
@@ -562,7 +563,7 @@ unsafe fn run(mut app: App, title: &CStr) {
         .queue_priorities(&prio)];
     let mut f13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
     let dev_exts = [khr::swapchain::NAME.as_ptr()];
-    let device: vk::Device = mk(c"create_device failed", |p| {
+    let device: vk::Device = mk(CREATE_LOGICAL_DEVICE_FAILED, |p| {
         vkCreateDevice(
             phys,
             &vk::DeviceCreateInfo::default()
@@ -587,7 +588,7 @@ unsafe fn run(mut app: App, title: &CStr) {
     let push = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX)
         .size(size_of::<Transform>() as u32)];
-    let layout: vk::PipelineLayout = mk(c"create_pipeline_layout failed", |p| {
+    let layout: vk::PipelineLayout = mk(CREATE_PIPELINE_LAYOUT_FAILED, |p| {
         vkCreatePipelineLayout(
             device,
             &vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push),
@@ -596,7 +597,7 @@ unsafe fn run(mut app: App, title: &CStr) {
         )
     });
 
-    let pool: vk::CommandPool = mk(c"create_command_pool failed", |p| {
+    let pool: vk::CommandPool = mk(CREATE_COMMAND_POOL_FAILED, |p| {
         vkCreateCommandPool(
             device,
             &vk::CommandPoolCreateInfo::default()
@@ -616,15 +617,15 @@ unsafe fn run(mut app: App, title: &CStr) {
                 .command_buffer_count(FRAMES as u32),
             cmds.as_mut_ptr(),
         ),
-        c"allocate_command_buffers failed",
+        ALLOCATE_COMMAND_BUFFERS_FAILED,
     );
     let image_avail: [vk::Semaphore; FRAMES] = core::array::from_fn(|_| {
-        mk(c"create_semaphore failed", |p| {
+        mk(CREATE_SEMAPHORE_FAILED, |p| {
             vkCreateSemaphore(device, &vk::SemaphoreCreateInfo::default(), NA, p)
         })
     });
     let fences: [vk::Fence; FRAMES] = core::array::from_fn(|_| {
-        mk(c"create_fence failed", |p| {
+        mk(CREATE_SEMAPHORE_FAILED, |p| {
             vkCreateFence(
                 device,
                 &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
@@ -655,11 +656,11 @@ unsafe fn run(mut app: App, title: &CStr) {
 
         ck(
             vkWaitForFences(device, 1, &fences[frame], vk::TRUE, u64::MAX),
-            c"wait_for_fences failed",
+            WAIT_FOR_FENCES_FAILED,
         );
 
         if resized {
-            ck(vkDeviceWaitIdle(device), c"device_wait_idle failed");
+            ck(vkDeviceWaitIdle(device), WAIT_FOR_DEVICE_IDLE_FAILED);
             let new = make_swapchain(&ctx, sc.handle);
             destroy_swapchain(&ctx, &sc);
             sc = new;
@@ -680,18 +681,18 @@ unsafe fn run(mut app: App, title: &CStr) {
                 resized = true;
                 continue;
             }
-            _ => die(c"acquire_next_image failed"),
+            _ => die(ACQUIRE_NEXT_IMAGE_FAILED),
         }
         let idx = idx as usize;
         ck(
             vkResetFences(device, 1, &fences[frame]),
-            c"reset_fences failed",
+            RESET_FENCES_FAILED,
         );
 
         let cmd = cmds[frame];
         ck(
             vkResetCommandBuffer(cmd, vk::CommandBufferResetFlags::empty()),
-            c"reset_command_buffer failed",
+            RESET_COMMAND_BUFFER_FAILED,
         );
         ck(
             vkBeginCommandBuffer(
@@ -699,7 +700,7 @@ unsafe fn run(mut app: App, title: &CStr) {
                 &vk::CommandBufferBeginInfo::default()
                     .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
             ),
-            c"begin_command_buffer failed",
+            BEGIN_COMMAND_BUFFER_FAILED,
         );
 
         transition(
@@ -796,7 +797,7 @@ unsafe fn run(mut app: App, title: &CStr) {
                 vk::AccessFlags::empty(),
             ),
         );
-        ck(vkEndCommandBuffer(cmd), c"end_command_buffer failed");
+        ck(vkEndCommandBuffer(cmd), END_COMMAND_BUFFER_FAILED);
 
         let wait = [image_avail[frame]];
         let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
@@ -813,7 +814,7 @@ unsafe fn run(mut app: App, title: &CStr) {
                     .signal_semaphores(&signal),
                 fences[frame],
             ),
-            c"queue_submit failed",
+            QUEUE_SUBMIT_FAILED,
         );
 
         let swapchains = [sc.handle];
@@ -827,7 +828,7 @@ unsafe fn run(mut app: App, title: &CStr) {
         ) {
             vk::Result::SUCCESS => {}
             vk::Result::SUBOPTIMAL_KHR | vk::Result::ERROR_OUT_OF_DATE_KHR => resized = true,
-            _ => die(c"queue_present failed"),
+            _ => die(QUEUE_PRESENT_FAILED),
         }
 
         if !shown {

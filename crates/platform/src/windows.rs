@@ -5,6 +5,7 @@ use core::{
     ffi::c_void,
     sync::atomic::{AtomicBool, Ordering::Relaxed},
 };
+use error_codes::windows::*;
 use win32_sys::*;
 
 pub const SURFACE_EXT: &CStr = khr::win32_surface::NAME;
@@ -80,7 +81,7 @@ pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
         class_name: c"w".as_ptr(),
     };
     if RegisterClassA(&class) == 0 {
-        die(c"RegisterClass failed");
+        die(REGISTER_CLASS_FAILED);
     }
     let hwnd = CreateWindowExA(
         0,
@@ -97,7 +98,7 @@ pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
         ptr::null(),
     );
     if hwnd == 0 {
-        die(c"CreateWindow failed");
+        die(CREATE_WINDOW_FAILED);
     }
     Window { hinstance, hwnd }
 }

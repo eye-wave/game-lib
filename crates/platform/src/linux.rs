@@ -3,6 +3,7 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     ffi::{c_char, c_void},
 };
+use error_codes::linux_xcb::*;
 use xcb_sys::*;
 
 pub const SURFACE_EXT: &CStr = khr::xcb_surface::NAME;
@@ -52,7 +53,7 @@ unsafe fn intern(c: *mut Conn, name: &str) -> u32 {
     let ck = xcb_intern_atom(c, 0, name.len() as u16, name.as_ptr() as *const c_char);
     let r = xcb_intern_atom_reply(c, ck, ptr::null_mut());
     if r.is_null() {
-        die(c"xcb_intern_atom failed");
+        die(XCB_INTERN_ATOM_FAILED);
     }
     let atom = (*r).atom;
     libc::free(r as *mut c_void);
@@ -62,7 +63,7 @@ unsafe fn intern(c: *mut Conn, name: &str) -> u32 {
 pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
     let conn = xcb_connect(ptr::null(), ptr::null_mut());
     if conn.is_null() || xcb_connection_has_error(conn) != 0 {
-        die(c"cannot connect to X server (is DISPLAY set?)");
+        die(CANNOT_CONNECT_TO_X_SERVER_DISPLAY_NOT_SET);
     }
     let root = (*xcb_setup_roots_iterator(xcb_get_setup(conn)).data).root;
 

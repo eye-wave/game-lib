@@ -4,6 +4,7 @@
 
 use ash::{khr, vk};
 use core::{ffi::CStr, ptr};
+use error_codes::vulkan_setup::CREATE_SURFACE_FAILED;
 use vulkan_sys::*;
 
 pub mod input;
@@ -15,7 +16,7 @@ pub use sys::*;
 
 unsafe fn surface_ck(r: vk::Result, s: vk::SurfaceKHR) -> vk::SurfaceKHR {
     if r != vk::Result::SUCCESS {
-        die(c"create_surface failed")
+        die(CREATE_SURFACE_FAILED)
     }
     s
 }
