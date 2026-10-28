@@ -1,7 +1,7 @@
 #![no_std]
 
 use ash::vk;
-use core::ptr;
+use core::{ffi::c_void, ptr};
 
 pub type A = *const vk::AllocationCallbacks<'static>;
 pub const NA: A = ptr::null();
@@ -178,6 +178,56 @@ unsafe extern "system" {
     pub fn vkCmdSetViewport(c: vk::CommandBuffer, first: u32, n: u32, v: *const vk::Viewport);
     pub fn vkCmdSetScissor(c: vk::CommandBuffer, first: u32, n: u32, r: *const vk::Rect2D);
     pub fn vkCmdDraw(c: vk::CommandBuffer, v: u32, i: u32, fv: u32, fi: u32);
+    pub fn vkGetPhysicalDeviceMemoryProperties(
+        p: vk::PhysicalDevice,
+        o: *mut vk::PhysicalDeviceMemoryProperties,
+    );
+    pub fn vkCreateBuffer(
+        d: vk::Device,
+        c: *const vk::BufferCreateInfo<'_>,
+        a: A,
+        o: *mut vk::Buffer,
+    ) -> vk::Result;
+    pub fn vkGetBufferMemoryRequirements(
+        d: vk::Device,
+        b: vk::Buffer,
+        o: *mut vk::MemoryRequirements,
+    );
+    pub fn vkAllocateMemory(
+        d: vk::Device,
+        c: *const vk::MemoryAllocateInfo<'_>,
+        a: A,
+        o: *mut vk::DeviceMemory,
+    ) -> vk::Result;
+    pub fn vkBindBufferMemory(
+        d: vk::Device,
+        b: vk::Buffer,
+        m: vk::DeviceMemory,
+        off: vk::DeviceSize,
+    ) -> vk::Result;
+    pub fn vkMapMemory(
+        d: vk::Device,
+        m: vk::DeviceMemory,
+        off: vk::DeviceSize,
+        size: vk::DeviceSize,
+        f: vk::MemoryMapFlags,
+        o: *mut *mut c_void,
+    ) -> vk::Result;
+    pub fn vkCmdBindVertexBuffers(
+        c: vk::CommandBuffer,
+        first: u32,
+        n: u32,
+        b: *const vk::Buffer,
+        off: *const vk::DeviceSize,
+    );
+    pub fn vkCmdPushConstants(
+        c: vk::CommandBuffer,
+        l: vk::PipelineLayout,
+        s: vk::ShaderStageFlags,
+        off: u32,
+        size: u32,
+        v: *const c_void,
+    );
     pub fn vkQueueSubmit(
         q: vk::Queue,
         n: u32,

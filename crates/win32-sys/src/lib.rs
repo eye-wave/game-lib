@@ -33,6 +33,9 @@ pub struct Msg {
 pub const WM_SIZE: u32 = 0x5;
 pub const WM_CLOSE: u32 = 0x10;
 pub const WM_KEYDOWN: u32 = 0x100;
+pub const WM_KEYUP: u32 = 0x101;
+pub const WM_SYSKEYDOWN: u32 = 0x104;
+pub const WM_SYSKEYUP: u32 = 0x105;
 pub const VK_ESCAPE: usize = 0x1B;
 pub const PM_REMOVE: u32 = 1;
 pub const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
@@ -47,6 +50,8 @@ unsafe extern "system" {
     pub fn HeapAlloc(heap: *mut c_void, flags: u32, size: usize) -> *mut c_void;
     pub fn HeapFree(heap: *mut c_void, flags: u32, p: *mut c_void) -> i32;
     pub fn ExitProcess(code: u32) -> !;
+    pub fn QueryPerformanceCounter(c: *mut i64) -> i32;
+    pub fn QueryPerformanceFrequency(f: *mut i64) -> i32;
 }
 
 #[link(name = "user32", kind = "raw-dylib")]

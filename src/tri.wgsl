@@ -1,26 +1,22 @@
+struct VsIn {
+    @location(0) pos: vec2<f32>,
+    @location(1) color: vec3<f32>,
+}
+
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec3<f32>,
 }
 
-// Vertices are hardcoded, so no vertex buffer is needed.
+// Per-draw translation, set from the entity's Pos (Vulkan push constant).
+var<immediate> offset: vec2<f32>;
+
 // WGSL clip space is y-up; naga flips Y when targeting Vulkan.
 @vertex
-fn vs_main(@builtin(vertex_index) i: u32) -> VsOut {
-    var positions = array<vec2<f32>, 3>(
-        vec2<f32>( 0.0,  0.5),
-        vec2<f32>( 0.5, -0.5),
-        vec2<f32>(-0.5, -0.5),
-    );
-    var colors = array<vec3<f32>, 3>(
-        vec3<f32>(1.0, 0.0, 0.0),
-        vec3<f32>(0.0, 1.0, 0.0),
-        vec3<f32>(0.0, 0.0, 1.0),
-    );
-
+fn vs_main(v: VsIn) -> VsOut {
     var out: VsOut;
-    out.pos = vec4<f32>(positions[i], 0.0, 1.0);
-    out.color = colors[i];
+    out.pos = vec4<f32>(v.pos + offset, 0.0, 1.0);
+    out.color = v.color;
     return out;
 }
 

@@ -120,13 +120,45 @@ pub unsafe fn surface(instance: vk::Instance, w: &Window) -> vk::SurfaceKHR {
     surface_ck(r, s)
 }
 
-/// Drain pending messages (sleeping while minimized); false means the user asked to quit.
-pub unsafe fn poll(w: &Window, resized: &mut bool) -> bool {
+/// Key id for a key message. WM_KEYDOWN reports generic Shift/Ctrl/Alt and shares VK_RETURN with the numpad,
+/// so left/right and numpad Enter are told apart from the scancode / extended bit in lparam.
+fn key_of(m: &Msg) -> Option<u8> {
+    let ext = (m.lparam >> 24) & 1 != 0;
+    let vk = match m.wparam {
+        0x10 if (m.lparam >> 16) & 0xFF == 0x36 => 0xA1, // right shift
+        0x10 => 0xA0,
+        0x11 => 0xA2 + ext as usize,
+        0x12 => 0xA4 + ext as usize,
+        0x0D if ext => return Some(input::NumpadEnter),
+        v => v,
+    };
+    input::from_windows(u8::try_from(vk).ok()?)
+}
+
+/// Seconds on the performance counter.
+pub fn now() -> f64 {
+    let (mut t, mut f) = (0i64, 1i64);
+    unsafe {
+        QueryPerformanceCounter(&mut t);
+        QueryPerformanceFrequency(&mut f);
+    }
+    t as f64 / f as f64
+}
+
+/// Drain pending messages (sleeping while minimized); false means the user asked to quit. `keys` is kept up to date with the held keys.
+pub unsafe fn poll(w: &Window, resized: &mut bool, keys: &mut input::Keys) -> bool {
     loop {
         let mut m: Msg = core::mem::zeroed();
         while PeekMessageA(&mut m, 0, 0, 0, PM_REMOVE) != 0 {
             if m.message == WM_KEYDOWN && m.wparam == VK_ESCAPE {
                 return false;
+            }
+            if let Some(k) = key_of(&m) {
+                match m.message {
+                    WM_KEYDOWN | WM_SYSKEYDOWN => keys.set(k, true),
+                    WM_KEYUP | WM_SYSKEYUP => keys.set(k, false),
+                    _ => {}
+                }
             }
             DispatchMessageA(&m);
         }

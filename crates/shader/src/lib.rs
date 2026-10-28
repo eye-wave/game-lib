@@ -61,7 +61,7 @@ fn compile(path: &std::path::Path, name: &std::path::Path) {
 
     let info = naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::empty(),
+        naga::valid::Capabilities::IMMEDIATES,
     )
     .validate(&module)
     .unwrap_or_else(|e| {

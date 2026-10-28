@@ -6,6 +6,8 @@ use ash::{khr, vk};
 use core::{ffi::CStr, ptr};
 use vulkan_sys::*;
 
+pub mod input;
+
 #[cfg_attr(unix, path = "linux.rs")]
 #[cfg_attr(windows, path = "windows.rs")]
 mod sys;

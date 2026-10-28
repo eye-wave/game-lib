@@ -67,7 +67,8 @@ pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
     let root = (*xcb_setup_roots_iterator(xcb_get_setup(conn)).data).root;
 
     let win = xcb_generate_id(conn);
-    let event_mask = [XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_STRUCTURE_NOTIFY];
+    let event_mask =
+        [XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE | XCB_EVENT_MASK_STRUCTURE_NOTIFY];
     xcb_create_window(
         conn,
         0,
@@ -132,8 +133,18 @@ pub unsafe fn surface(instance: vk::Instance, w: &Window) -> vk::SurfaceKHR {
     surface_ck(r, s)
 }
 
-/// Drain pending events; false means the user asked to quit.
-pub unsafe fn poll(w: &Window, resized: &mut bool) -> bool {
+/// Seconds on a monotonic clock.
+pub fn now() -> f64 {
+    let mut t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut t) };
+    t.tv_sec as f64 + t.tv_nsec as f64 * 1e-9
+}
+
+/// Drain pending events; false means the user asked to quit. `keys` is kept up to date with the held keys.
+pub unsafe fn poll(w: &Window, resized: &mut bool, keys: &mut input::Keys) -> bool {
     let mut running = true;
     loop {
         let e = xcb_poll_for_event(w.conn);
@@ -148,6 +159,11 @@ pub unsafe fn poll(w: &Window, resized: &mut bool) -> bool {
             }
             XCB_CONFIGURE_NOTIFY => *resized = true,
             XCB_KEY_PRESS if (*e).detail == KEYCODE_ESCAPE => running = false,
+            t @ (XCB_KEY_PRESS | XCB_KEY_RELEASE) => {
+                if let Some(k) = input::from_linux((*e).detail) {
+                    keys.set(k, t == XCB_KEY_PRESS);
+                }
+            }
             _ => {}
         }
         libc::free(e as *mut c_void);

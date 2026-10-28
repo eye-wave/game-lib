@@ -94,8 +94,10 @@ unsafe extern "C" {
 
 pub const XCB_CW_EVENT_MASK: u32 = 0x800;
 pub const XCB_EVENT_MASK_KEY_PRESS: u32 = 1;
+pub const XCB_EVENT_MASK_KEY_RELEASE: u32 = 2;
 pub const XCB_EVENT_MASK_STRUCTURE_NOTIFY: u32 = 1 << 17;
 pub const XCB_KEY_PRESS: u8 = 2;
+pub const XCB_KEY_RELEASE: u8 = 3;
 pub const XCB_CONFIGURE_NOTIFY: u8 = 22;
 pub const XCB_CLIENT_MESSAGE: u8 = 33;
 pub const XCB_ATOM_ATOM: u32 = 4;

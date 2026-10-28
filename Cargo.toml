@@ -13,10 +13,10 @@ members = ["crates/*"]
 ash = { version = "0.38", default-features = false }
 
 [dependencies]
-ash = { workspace = true }
+ecs = { path = "crates/ecs" }
+gfx = { path = "crates/gfx" }
 platform = { path = "crates/platform" }
 shader = { path = "crates/shader" }
-vulkan-sys = { path = "crates/vulkan-sys" }
 
 [build-dependencies]
 shader = { path = "crates/shader", features = ["build"] }
@@ -28,7 +28,7 @@ winresource = "0.1"
 panic = "immediate-abort"
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 codegen-units = 1
 lto = "fat"
 panic = "immediate-abort"
