@@ -14,6 +14,10 @@ build:
 ifeq ($(OS),Windows_NT)
 	-signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f "$(PFX)" /p "$(PFX_PASS)" $(BIN)
 else
-	-strip --strip-unneeded -R .comment -R .eh_frame -R .eh_frame_hdr $(BIN) 2>/dev/null || true
+	-strip --strip-all \
+		-R .comment \
+		-R .eh_frame \
+		-R .eh_frame_hdr \
+		$(BIN) 2>/dev/null || true
 	-sstrip $(BIN)
 endif
