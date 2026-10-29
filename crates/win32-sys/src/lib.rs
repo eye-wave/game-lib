@@ -32,7 +32,6 @@ pub struct Msg {
 
 pub const WM_SIZE: u32 = 0x5;
 pub const WM_CLOSE: u32 = 0x10;
-pub const WM_MOUSEMOVE: u32 = 0x200;
 pub const WM_KEYDOWN: u32 = 0x100;
 pub const WM_KEYUP: u32 = 0x101;
 pub const WM_SYSKEYDOWN: u32 = 0x104;
@@ -59,6 +58,11 @@ unsafe extern "system" {
 unsafe extern "system" {
     pub fn ClientToScreen(h: isize, p: *mut [i32; 2]) -> i32;
     pub fn SetCursorPos(x: i32, y: i32) -> i32;
+    pub fn GetCursorPos(p: *mut [i32; 2]) -> i32;
+    pub fn GetClientRect(h: isize, r: *mut [i32; 4]) -> i32;
+    pub fn ClipCursor(r: *const [i32; 4]) -> i32;
+    pub fn ShowCursor(show: i32) -> i32;
+    pub fn GetForegroundWindow() -> isize;
     pub fn RegisterClassA(c: *const WndClass) -> u16;
     pub fn CreateWindowExA(
         ex_style: u32,

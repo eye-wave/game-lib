@@ -18,7 +18,7 @@ const ALIGN: usize = 16; // max supported component alignment == arena base alig
 struct Chunk([u8; ALIGN]); // backing unit, guarantees a 16-aligned base pointer
 
 /// Stable allocation id + generation. Survives compaction; stale after the slot is freed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Handle {
     id: u32,
     generation: u32,
@@ -50,8 +50,10 @@ unsafe fn drop_t<T>(p: *mut u8) {
 
 // ---------------------------------------------------------------- arena
 
+// pub only because GetNMut's hook names it; fields and methods stay private.
+#[doc(hidden)]
 #[derive(Default)]
-struct Arena {
+pub struct Arena {
     buf: Vec<Chunk>,
     used: usize, // bump pointer in bytes
     slots: Vec<Slot>,
@@ -140,10 +142,14 @@ impl Arena {
         Some(unsafe { &*self.buf.as_ptr().cast::<u8>().add(off).cast::<T>() })
     }
 
-    fn get_mut<T: 'static>(&mut self, h: Handle) -> Option<&mut T> {
+    fn get_one_mut<T: 'static>(&mut self, h: Handle) -> Option<&mut T> {
         let off = self.offset(h, TypeId::of::<T>())?;
-        // SAFETY: as above; &mut self makes this the only access.
+        // SAFETY: live slot of type T at an aligned in-bounds offset; &mut self is exclusive.
         Some(unsafe { &mut *self.base().add(off).cast::<T>() })
+    }
+
+    fn get_tuple_mut<T: GetNMut>(&mut self, handles: &[Handle]) -> Option<T::Output<'_>> {
+        T::get_mut_arena(self, handles)
     }
 
     fn release(&mut self, id: u32) {
@@ -258,6 +264,78 @@ bundle!(A, B, C, D, E, F);
 bundle!(A, B, C, D, E, F, G);
 bundle!(A, B, C, D, E, F, G, H);
 
+pub trait GetNMut {
+    type Output<'a>;
+
+    fn get_mut<'a>(world: &'a mut World, e: Entity) -> Option<Self::Output<'a>>;
+
+    #[doc(hidden)]
+    fn get_mut_arena<'a>(arena: &'a mut Arena, handles: &[Handle]) -> Option<Self::Output<'a>>;
+}
+
+macro_rules! getn_mut {
+    ($($T:ident : $idx:tt),+) => {
+        impl<$($T: 'static),+> GetNMut for ($($T,)+) {
+            type Output<'a> = ($(&'a mut $T,)+);
+
+            fn get_mut<'a>(
+                world: &'a mut World,
+                e: Entity,
+            ) -> Option<Self::Output<'a>> {
+                let slot = world.ents.get(e.idx as usize)?;
+                if slot.generation != e.generation {
+                    return None;
+                }
+                let mut handles = [Handle { id: 0, generation: 0 }; getn_mut!(@count $($T),+)];
+                $(
+                    handles[$idx] = slot.comps.iter().find(|c| c.0 == id::<$T>())?.1;
+                )+
+                world.arena.get_tuple_mut::<Self>(&handles)
+            }
+
+            fn get_mut_arena<'a>(
+                arena: &'a mut Arena,
+                handles: &[Handle],
+            ) -> Option<Self::Output<'a>> {
+                if handles.len() != getn_mut!(@count $($T),+) {
+                    return None;
+                }
+                // Same slot twice (e.g. (u32, u32)) would alias two &mut: refuse.
+                for i in 0..handles.len() {
+                    for j in i + 1..handles.len() {
+                        if handles[i].id == handles[j].id {
+                            return None;
+                        }
+                    }
+                }
+                let base = arena.base(); // one base pointer for every reference below
+                // SAFETY: each handle is a distinct live slot of the requested type (checked by
+                // `offset` + the distinctness loop), so the references are disjoint and in bounds.
+                unsafe {
+                    Some(($(
+                        &mut *base
+                            .add(arena.offset(handles[$idx], TypeId::of::<$T>())?)
+                            .cast::<$T>(),
+                    )+))
+                }
+            }
+        }
+    };
+
+    (@count $first:ident $(,$rest:ident)*) => {
+        1usize $(+ { let _ = stringify!($rest); 1usize })*
+    };
+}
+
+getn_mut!(A: 0);
+getn_mut!(A: 0, B: 1);
+getn_mut!(A: 0, B: 1, C: 2);
+getn_mut!(A: 0, B: 1, C: 2, D: 3);
+getn_mut!(A: 0, B: 1, C: 2, D: 3, E: 4);
+getn_mut!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5);
+getn_mut!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6);
+getn_mut!(A: 0, B: 1, C: 2, D: 3, E: 4, F: 5, G: 6, H: 7);
+
 impl World {
     pub fn spawn(&mut self) -> Entity {
         match self.free.pop() {
@@ -301,16 +379,14 @@ impl World {
 
     /// Singleton values (one per type), stored as components of a hidden entity.
     pub fn insert_resource<T: 'static>(&mut self, v: T) {
-        let e = *self.res.get_or_insert_with(|| {
-            self.ents.push(EntitySlot {
-                generation: 0,
-                comps: Vec::new(),
-            });
-            Entity {
-                idx: self.ents.len() as u32 - 1,
-                generation: 0,
+        let e = match self.res {
+            Some(e) => e,
+            None => {
+                let e = self.spawn();
+                self.res = Some(e);
+                e
             }
-        });
+        };
         self.insert(e, v);
     }
 
@@ -319,7 +395,8 @@ impl World {
     }
 
     pub fn resource_mut<T: 'static>(&mut self) -> Option<&mut T> {
-        self.get_mut(self.res?)
+        let e = self.res?;
+        Some(self.getn_mut::<(T,)>(e)?.0)
     }
 
     pub fn alive(&self, e: Entity) -> bool {
@@ -350,7 +427,7 @@ impl World {
             return false;
         }
         if let Some(h) = self.handle(e, id::<T>()) {
-            *self.arena.get_mut::<T>(h).unwrap() = v; // drops the old value
+            *self.arena.get_one_mut::<T>(h).unwrap() = v; // drops the old value
             return true;
         }
         let h = self.arena.insert(v);
@@ -383,11 +460,16 @@ impl World {
 
     pub fn get_mut<T: 'static>(&mut self, e: Entity) -> Option<&mut T> {
         let h = self.handle(e, id::<T>())?;
-        self.arena.get_mut(h)
+        self.arena.get_one_mut::<T>(h)
     }
 
-    /// Entities having ALL of `types`. Walks the smallest type index, checks the rest via the
-    /// entity's own component list. Returns a Vec so callers may mutate the world while looping.
+    pub fn getn_mut<T: GetNMut>(&mut self, e: Entity) -> Option<T::Output<'_>> {
+        T::get_mut(self, e)
+    }
+
+    /// Entities having ALL of `types` (the hidden resource entity is skipped). Walks the smallest
+    /// type index, checks the rest via the entity's own component list. Returns a Vec so callers
+    /// may mutate the world while looping.
     /// empty `types` yields nothing; make it a lazy iterator if allocation shows up.
     pub fn query(&self, types: &[TypeId]) -> Vec<Entity> {
         let mut lists = Vec::with_capacity(types.len());
@@ -405,7 +487,7 @@ impl World {
             .map(|&(e, _)| e)
             .filter(|e| {
                 let c = &self.ents[e.idx as usize].comps;
-                types.iter().all(|t| c.iter().any(|x| x.0 == *t))
+                Some(*e) != self.res && types.iter().all(|t| c.iter().any(|x| x.0 == *t))
             })
             .collect()
     }
@@ -467,6 +549,12 @@ pub struct App {
     started: bool,
 }
 
+pub enum Schedule {
+    Startup,
+    Update,
+    Fixed,
+}
+
 impl App {
     pub fn new(tick_hz: f32) -> Self {
         let mut app = App {
@@ -488,18 +576,17 @@ impl App {
         self.step = 1.0 / hz;
     }
 
-    pub fn add_startup(&mut self, f: impl FnMut(&mut World, f32) + 'static) -> &mut Self {
-        self.startup.push(Box::new(f));
-        self
-    }
+    pub fn add_system(
+        &mut self,
+        schedule: Schedule,
+        f: impl FnMut(&mut World, f32) + 'static,
+    ) -> &mut Self {
+        match schedule {
+            Schedule::Startup => self.startup.push(Box::new(f)),
+            Schedule::Update => self.update.push(Box::new(f)),
+            Schedule::Fixed => self.fixed.push(Box::new(f)),
+        }
 
-    pub fn add_fixed(&mut self, f: impl FnMut(&mut World, f32) + 'static) -> &mut Self {
-        self.fixed.push(Box::new(f));
-        self
-    }
-
-    pub fn add_update(&mut self, f: impl FnMut(&mut World, f32) + 'static) -> &mut Self {
-        self.update.push(Box::new(f));
         self
     }
 
@@ -547,10 +634,22 @@ mod tests {
         w.insert_resource(7i64);
         *w.resource_mut::<i64>().unwrap() += 1;
         assert_eq!(w.resource::<i64>(), Some(&8));
-        assert_eq!(w.query_of::<(i64,)>().len(), 1);
+        assert!(w.query_of::<(i64,)>().is_empty()); // resources stay out of queries
         w.despawn(a);
         w.compact();
         assert_eq!(w.get::<u32>(b), Some(&3));
         assert!(!w.alive(a) && w.get::<u32>(a).is_none());
+    }
+
+    #[test]
+    fn multi_mut_and_aliasing() {
+        let mut w = World::default();
+        let e = w.spawn_with((1u32, 2.0f32));
+        let (u, f) = w.getn_mut::<(u32, f32)>(e).unwrap();
+        *u += 1;
+        *f += 1.0;
+        assert_eq!((w.get::<u32>(e), w.get::<f32>(e)), (Some(&2), Some(&3.0)));
+        assert!(w.getn_mut::<(u32, u32)>(e).is_none()); // would alias
+        assert!(w.getn_mut::<(u32, u8)>(e).is_none()); // missing component
     }
 }

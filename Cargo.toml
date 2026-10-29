@@ -15,6 +15,7 @@ ash = { version = "0.38", default-features = false }
 [dependencies]
 ecs = { path = "crates/ecs" }
 gfx = { path = "crates/gfx" }
+math = { path = "crates/math" }
 platform = { path = "crates/platform" }
 shader = { path = "crates/shader" }
 
@@ -32,7 +33,7 @@ opt-level = "z"
 codegen-units = 1
 lto = "fat"
 panic = "immediate-abort"
-strip = "debuginfo" # "true" links ~15KB of libm here; the Makefile strips symbols anyway
+strip = "debuginfo"                          # "true" links ~15KB of libm here; the Makefile strips symbols anyway
 debug = false
 overflow-checks = false
 trim-paths = "all"

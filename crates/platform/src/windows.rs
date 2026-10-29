@@ -103,13 +103,6 @@ pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
 }
 
 /// Windows start hidden (an unpainted window during Vulkan init looks like a white hang); call once the first frame is queued.
-/// Move the cursor to a window pixel (used to turn the mouse into endless relative motion).
-pub unsafe fn warp_cursor(w: &Window, x: i32, y: i32) {
-    let mut p = [x, y];
-    ClientToScreen(w.hwnd, &mut p);
-    SetCursorPos(p[0], p[1]);
-}
-
 pub unsafe fn show(w: &Window) {
     ShowWindow(w.hwnd, SW_SHOW);
 }
@@ -152,22 +145,56 @@ pub fn now() -> f64 {
     t as f64 / f as f64
 }
 
-/// Drain pending messages (sleeping while minimized); false means the user asked to quit. `state` is kept up to date with the held keys and the cursor.
-pub unsafe fn poll(w: &Window, resized: &mut bool, state: &mut input::State) -> bool {
+static CAPTURED: AtomicBool = AtomicBool::new(false);
+
+/// FPS-style mouse: while the window is in the foreground the cursor is hidden and confined to it, and every call
+/// returns how far it moved (pixels, x right, y down) since the last call, then puts it back on (`cx`, `cy`) so it
+/// never runs out of room. Returns 0 while the window is in the background.
+pub unsafe fn mouse_delta(w: &Window, cx: i32, cy: i32) -> [f32; 2] {
+    let was = CAPTURED.load(Relaxed);
+    if GetForegroundWindow() != w.hwnd {
+        if was {
+            ClipCursor(ptr::null());
+            ShowCursor(1);
+            CAPTURED.store(false, Relaxed);
+        }
+        return [0.0; 2];
+    }
+    // the window may have moved or resized: refresh the clip rectangle and the center every call
+    let (mut r, mut c) = ([0i32; 4], [cx, cy]);
+    GetClientRect(w.hwnd, &mut r);
+    let (mut tl, mut br) = ([r[0], r[1]], [r[2], r[3]]);
+    ClientToScreen(w.hwnd, &mut tl);
+    ClientToScreen(w.hwnd, &mut br);
+    ClientToScreen(w.hwnd, &mut c);
+    ClipCursor(&[tl[0], tl[1], br[0], br[1]]);
+    if !was {
+        ShowCursor(0);
+        SetCursorPos(c[0], c[1]); // so the first real delta starts from the center
+        CAPTURED.store(true, Relaxed);
+        return [0.0; 2];
+    }
+    let mut p = [0i32; 2];
+    GetCursorPos(&mut p);
+    let d = [p[0] - c[0], p[1] - c[1]];
+    if d != [0, 0] {
+        SetCursorPos(c[0], c[1]);
+    }
+    [d[0] as f32, d[1] as f32]
+}
+
+/// Drain pending messages (sleeping while minimized); false means the user asked to quit. `keys` is kept up to date with the held keys.
+pub unsafe fn poll(w: &Window, resized: &mut bool, keys: &mut input::Keys) -> bool {
     loop {
         let mut m: Msg = core::mem::zeroed();
         while PeekMessageA(&mut m, 0, 0, 0, PM_REMOVE) != 0 {
             if m.message == WM_KEYDOWN && m.wparam == VK_ESCAPE {
                 return false;
             }
-            if m.message == WM_MOUSEMOVE {
-                // lparam: x in the low word, y in the high word, both signed
-                state.mouse = [m.lparam as i16 as i32, (m.lparam >> 16) as i16 as i32];
-            }
             if let Some(k) = key_of(&m) {
                 match m.message {
-                    WM_KEYDOWN | WM_SYSKEYDOWN => state.keys.set(k, true),
-                    WM_KEYUP | WM_SYSKEYUP => state.keys.set(k, false),
+                    WM_KEYDOWN | WM_SYSKEYDOWN => keys.set(k, true),
+                    WM_KEYUP | WM_SYSKEYUP => keys.set(k, false),
                     _ => {}
                 }
             }

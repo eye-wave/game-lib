@@ -9,8 +9,6 @@
 
 extern crate alloc;
 
-pub mod math;
-
 use alloc::vec::Vec;
 use ash::khr;
 pub use ash::vk;
@@ -21,11 +19,8 @@ use core::{
 };
 use ecs::App;
 use errors::prelude::*;
-use math::{cos, sin};
-use platform::{
-    die,
-    input::{Keys, State},
-};
+use math::FloatExt;
+use platform::{die, input::Keys};
 use shader::{Align4, words};
 use vulkan_sys::*;
 
@@ -167,7 +162,8 @@ impl Default for Camera {
 pub struct PostProcess(pub Option<&'static Align4<[u8]>>);
 
 /// Resource: keyboard and mouse. Keys are `platform::input::*` ids (`KeyW`, `ArrowLeft`, `Space`, ...).
-/// The cursor is kept at the window center, so the mouse only reports motion (`mouse_delta`): mouse look.
+/// The mouse is captured (hidden, confined, recentered) while the window has focus, so it only reports motion
+/// (`mouse_delta`), like an FPS.
 #[derive(Clone, Copy, Default)]
 pub struct Input {
     now: Keys,
@@ -187,7 +183,7 @@ impl Input {
         let any = |ks: &[u8]| ks.iter().any(|&k| self.is_holding(k));
         any(plus) as i8 as f32 - any(minus) as i8 as f32
     }
-    /// Mouse motion since the last frame in pixels (x right, y down).
+    /// Mouse motion since the last frame (x right, y down): raw device units on Linux with XInput2, else pixels.
     pub fn mouse_delta(&self) -> [f32; 2] {
         self.delta
     }
@@ -530,7 +526,7 @@ struct CullPc {
 
 /// View * projection, column-major, depth range 0..1 (see `Camera` for the conventions).
 fn view_proj(c: &Camera, aspect: f32) -> [f32; 16] {
-    let (sy, cy, sp, cp) = (sin(c.yaw), cos(c.yaw), sin(c.pitch), cos(c.pitch));
+    let (sy, cy, sp, cp) = (c.yaw.sin(), (c.yaw).cos(), (c.pitch).sin(), (c.pitch).cos());
     let f = [-sy * cp, sp, -cy * cp]; // forward
     let r = [cy, 0.0, -sy]; // right
     let u = [sp * sy, cp, sp * cy]; // up
@@ -1139,32 +1135,26 @@ unsafe fn run(mut app: App, title: &CStr) {
     let mut resized = false;
     let mut shown = false;
     let mut frame = 0usize;
-    let mut state = State::default();
+    let mut keys = Keys::default();
     let (mut gpu_meshes, mut pipes): (Vec<Option<GpuMesh>>, Vec<Option<vk::Pipeline>>) =
         (Vec::new(), Vec::new());
     let mut last = platform::now();
     let start = last;
     let center = |e: vk::Extent2D| [(e.width / 2) as i32, (e.height / 2) as i32];
-    state.mouse = center(sc.extent);
     let mut post_pipe: Option<(&'static Align4<[u8]>, vk::Pipeline)> = None;
 
     loop {
-        if !platform::poll(&w, &mut resized, &mut state) {
+        if !platform::poll(&w, &mut resized, &mut keys) {
             break;
         }
         let now = platform::now();
         let dt = (now - last) as f32;
         last = now;
-        // Mouse look: the cursor's offset from the window center is this frame's motion; then put it back.
         let c = center(sc.extent);
-        let delta = [state.mouse[0] - c[0], state.mouse[1] - c[1]];
-        if delta != [0, 0] {
-            platform::warp_cursor(&w, c[0], c[1]);
-            state.mouse = c;
-        }
+        let delta = platform::mouse_delta(&w, c[0], c[1]);
         let input = app.world.resource_mut::<Input>().unwrap();
-        (input.prev, input.now) = (input.now, state.keys);
-        input.delta = [delta[0] as f32, delta[1] as f32];
+        (input.prev, input.now) = (input.now, keys);
+        input.delta = delta;
         app.run_frame(dt);
 
         ck(
@@ -1178,7 +1168,6 @@ unsafe fn run(mut app: App, title: &CStr) {
             destroy_swapchain(&ctx, &sc);
             sc = new;
             write_post_set(&ctx, post_set, sampler, sc.scene.view);
-            state.mouse = center(sc.extent);
             resized = false;
         }
 
