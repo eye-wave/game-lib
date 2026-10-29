@@ -161,6 +161,11 @@ impl Default for Camera {
 #[derive(Clone, Copy, Default)]
 pub struct PostProcess(pub Option<&'static Align4<[u8]>>);
 
+/// Resource: whether the mouse is captured (default true). Insert `MouseCapture(false)` before `app.run(..)` to keep
+/// the normal pointer, e.g. in 2D apps that don't use `mouse_delta`. Changing it while running is not supported.
+#[derive(Clone, Copy)]
+pub struct MouseCapture(pub bool);
+
 /// Resource: keyboard and mouse. Keys are `platform::input::*` ids (`KeyW`, `ArrowLeft`, `Space`, ...).
 /// The mouse is captured (hidden, confined, recentered) while the window has focus, so it only reports motion
 /// (`mouse_delta`), like an FPS.
@@ -829,6 +834,9 @@ unsafe fn run(mut app: App, title: &CStr) {
     app.world.insert_resource(Assets::<Mesh>::default());
     app.world.insert_resource(Assets::<Material>::default());
     app.world.insert_resource(Input::default());
+    if app.world.resource::<MouseCapture>().is_none() {
+        app.world.insert_resource(MouseCapture(true));
+    }
     app.world.insert_resource(Camera::default());
     app.world.insert_resource(PostProcess::default());
 
@@ -1151,7 +1159,11 @@ unsafe fn run(mut app: App, title: &CStr) {
         let dt = (now - last) as f32;
         last = now;
         let c = center(sc.extent);
-        let delta = platform::mouse_delta(&w, c[0], c[1]);
+        let delta = if app.world.resource::<MouseCapture>().unwrap().0 {
+            platform::mouse_delta(&w, c[0], c[1])
+        } else {
+            [0.0; 2]
+        };
         let input = app.world.resource_mut::<Input>().unwrap();
         (input.prev, input.now) = (input.now, keys);
         input.delta = delta;

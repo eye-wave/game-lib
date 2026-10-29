@@ -1,29 +1,11 @@
-
 cargo-features = ["profile-rustflags", "panic-immediate-abort"]
 
-[package]
-name = "stupid-game"
-version = "0.1.0"
-edition = "2024"
-
 [workspace]
-members = ["crates/*"]
+resolver = "3"
+members = ["crates/*", "apps/*"]
 
 [workspace.dependencies]
 ash = { version = "0.38", default-features = false }
-
-[dependencies]
-ecs = { path = "crates/ecs" }
-gfx = { path = "crates/gfx" }
-math = { path = "crates/math" }
-platform = { path = "crates/platform" }
-shader = { path = "crates/shader" }
-
-[build-dependencies]
-shader = { path = "crates/shader", features = ["build"] }
-
-[target.'cfg(target_os = "windows")'.build-dependencies]
-winresource = "0.1"
 
 [profile.dev]
 panic = "immediate-abort"
