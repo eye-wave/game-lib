@@ -35,6 +35,20 @@ pub struct Event {
     pub sequence: u16,
 }
 #[repr(C)]
+pub struct MotionEvent {
+    pub response_type: u8,
+    pub detail: u8,
+    pub sequence: u16,
+    pub time: u32,
+    pub root: u32,
+    pub event: u32,
+    pub child: u32,
+    pub root_x: i16,
+    pub root_y: i16,
+    pub event_x: i16, // relative to the window
+    pub event_y: i16,
+}
+#[repr(C)]
 pub struct ClientMsg {
     pub response_type: u8,
     pub format: u8,
@@ -95,9 +109,11 @@ unsafe extern "C" {
 pub const XCB_CW_EVENT_MASK: u32 = 0x800;
 pub const XCB_EVENT_MASK_KEY_PRESS: u32 = 1;
 pub const XCB_EVENT_MASK_KEY_RELEASE: u32 = 2;
+pub const XCB_EVENT_MASK_POINTER_MOTION: u32 = 1 << 6;
 pub const XCB_EVENT_MASK_STRUCTURE_NOTIFY: u32 = 1 << 17;
 pub const XCB_KEY_PRESS: u8 = 2;
 pub const XCB_KEY_RELEASE: u8 = 3;
+pub const XCB_MOTION_NOTIFY: u8 = 6;
 pub const XCB_CONFIGURE_NOTIFY: u8 = 22;
 pub const XCB_CLIENT_MESSAGE: u8 = 33;
 pub const XCB_ATOM_ATOM: u32 = 4;

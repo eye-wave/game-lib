@@ -32,6 +32,7 @@ pub struct Msg {
 
 pub const WM_SIZE: u32 = 0x5;
 pub const WM_CLOSE: u32 = 0x10;
+pub const WM_MOUSEMOVE: u32 = 0x200;
 pub const WM_KEYDOWN: u32 = 0x100;
 pub const WM_KEYUP: u32 = 0x101;
 pub const WM_SYSKEYDOWN: u32 = 0x104;

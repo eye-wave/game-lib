@@ -228,6 +228,56 @@ unsafe extern "system" {
         size: u32,
         v: *const c_void,
     );
+    pub fn vkCreateDescriptorSetLayout(
+        d: vk::Device,
+        c: *const vk::DescriptorSetLayoutCreateInfo<'_>,
+        a: A,
+        o: *mut vk::DescriptorSetLayout,
+    ) -> vk::Result;
+    pub fn vkCreateDescriptorPool(
+        d: vk::Device,
+        c: *const vk::DescriptorPoolCreateInfo<'_>,
+        a: A,
+        o: *mut vk::DescriptorPool,
+    ) -> vk::Result;
+    pub fn vkAllocateDescriptorSets(
+        d: vk::Device,
+        c: *const vk::DescriptorSetAllocateInfo<'_>,
+        o: *mut vk::DescriptorSet,
+    ) -> vk::Result;
+    pub fn vkUpdateDescriptorSets(
+        d: vk::Device,
+        nw: u32,
+        w: *const vk::WriteDescriptorSet<'_>,
+        nc: u32,
+        c: *const vk::CopyDescriptorSet<'_>,
+    );
+    pub fn vkCreateComputePipelines(
+        d: vk::Device,
+        cache: vk::PipelineCache,
+        n: u32,
+        c: *const vk::ComputePipelineCreateInfo<'_>,
+        a: A,
+        o: *mut vk::Pipeline,
+    ) -> vk::Result;
+    pub fn vkCmdBindDescriptorSets(
+        c: vk::CommandBuffer,
+        bp: vk::PipelineBindPoint,
+        l: vk::PipelineLayout,
+        first: u32,
+        n: u32,
+        s: *const vk::DescriptorSet,
+        nd: u32,
+        d: *const u32,
+    );
+    pub fn vkCmdDispatch(c: vk::CommandBuffer, x: u32, y: u32, z: u32);
+    pub fn vkCmdDrawIndirect(
+        c: vk::CommandBuffer,
+        b: vk::Buffer,
+        off: vk::DeviceSize,
+        n: u32,
+        stride: u32,
+    );
     pub fn vkQueueSubmit(
         q: vk::Queue,
         n: u32,

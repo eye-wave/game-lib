@@ -176,7 +176,7 @@ impl Arena {
         let mut ids: Vec<u32> = (0..self.slots.len() as u32)
             .filter(|&i| self.slots[i as usize].live)
             .collect();
-        ids.sort_by_key(|&i| self.slots[i as usize].offset);
+        ids.sort_unstable_by_key(|&i| self.slots[i as usize].offset);
         let base = self.base();
         let mut cur = 0usize;
         for i in ids {

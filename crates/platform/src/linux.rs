@@ -3,7 +3,6 @@ use core::{
     alloc::{GlobalAlloc, Layout},
     ffi::{c_char, c_void},
 };
-use error_codes::linux_xcb::*;
 use xcb_sys::*;
 
 pub const SURFACE_EXT: &CStr = khr::xcb_surface::NAME;
@@ -68,8 +67,10 @@ pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
     let root = (*xcb_setup_roots_iterator(xcb_get_setup(conn)).data).root;
 
     let win = xcb_generate_id(conn);
-    let event_mask =
-        [XCB_EVENT_MASK_KEY_PRESS | XCB_EVENT_MASK_KEY_RELEASE | XCB_EVENT_MASK_STRUCTURE_NOTIFY];
+    let event_mask = [XCB_EVENT_MASK_KEY_PRESS
+        | XCB_EVENT_MASK_KEY_RELEASE
+        | XCB_EVENT_MASK_POINTER_MOTION
+        | XCB_EVENT_MASK_STRUCTURE_NOTIFY];
     xcb_create_window(
         conn,
         0,
@@ -144,8 +145,8 @@ pub fn now() -> f64 {
     t.tv_sec as f64 + t.tv_nsec as f64 * 1e-9
 }
 
-/// Drain pending events; false means the user asked to quit. `keys` is kept up to date with the held keys.
-pub unsafe fn poll(w: &Window, resized: &mut bool, keys: &mut input::Keys) -> bool {
+/// Drain pending events; false means the user asked to quit. `state` is kept up to date with the held keys and the cursor.
+pub unsafe fn poll(w: &Window, resized: &mut bool, state: &mut input::State) -> bool {
     let mut running = true;
     loop {
         let e = xcb_poll_for_event(w.conn);
@@ -162,8 +163,12 @@ pub unsafe fn poll(w: &Window, resized: &mut bool, keys: &mut input::Keys) -> bo
             XCB_KEY_PRESS if (*e).detail == KEYCODE_ESCAPE => running = false,
             t @ (XCB_KEY_PRESS | XCB_KEY_RELEASE) => {
                 if let Some(k) = input::from_linux((*e).detail) {
-                    keys.set(k, t == XCB_KEY_PRESS);
+                    state.keys.set(k, t == XCB_KEY_PRESS);
                 }
+            }
+            XCB_MOTION_NOTIFY => {
+                let m = &*(e as *const MotionEvent);
+                state.mouse = [m.event_x as i32, m.event_y as i32];
             }
             _ => {}
         }

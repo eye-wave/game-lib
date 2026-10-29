@@ -1,3 +1,5 @@
+//! Fatal-error codes: `die(errors::X)` shows only the short code, so no message text ends up in the binary.
+//! This file is the lookup table; 1xx setup, 2xx resources, 3xx rendering, 4xx linux, 5xx windows, 6xx engine.
 #![no_std]
 
 pub mod vulkan_setup {
@@ -20,7 +22,7 @@ pub mod vulkan_resources {
     pub const GET_SWAPCHAIN_IMAGES_FAILED: &CStr = c"error203";
     pub const CREATE_IMAGE_VIEW_FAILED: &CStr = c"error204";
     pub const CREATE_BUFFER_FAILED: &CStr = c"error205";
-    pub const NO_HOST_VISIBLE_MEMORY_TYPE: &CStr = c"error206";
+    pub const NO_SUITABLE_MEMORY_TYPE: &CStr = c"error206";
     pub const ALLOCATE_MEMORY_FAILED: &CStr = c"error207";
     pub const BIND_BUFFER_MEMORY_FAILED: &CStr = c"error208";
     pub const MAP_MEMORY_FAILED: &CStr = c"error209";
@@ -29,6 +31,9 @@ pub mod vulkan_resources {
     pub const ALLOCATE_COMMAND_BUFFERS_FAILED: &CStr = c"error212";
     pub const CREATE_SEMAPHORE_FAILED: &CStr = c"error213";
     pub const CREATE_FENCE_FAILED: &CStr = c"error214";
+    pub const CREATE_DESCRIPTOR_SET_LAYOUT_FAILED: &CStr = c"error215";
+    pub const CREATE_DESCRIPTOR_POOL_FAILED: &CStr = c"error216";
+    pub const ALLOCATE_DESCRIPTOR_SETS_FAILED: &CStr = c"error217";
 }
 
 pub mod vulkan_rendering {
@@ -44,6 +49,7 @@ pub mod vulkan_rendering {
     pub const END_COMMAND_BUFFER_FAILED: &CStr = c"error308";
     pub const QUEUE_SUBMIT_FAILED: &CStr = c"error309";
     pub const QUEUE_PRESENT_FAILED: &CStr = c"error310";
+    pub const CREATE_COMPUTE_PIPELINES_FAILED: &CStr = c"error311";
 }
 
 pub mod linux_xcb {
@@ -65,6 +71,7 @@ pub mod game_engine {
 
     pub const MATERIAL_ATTRIBUTE_FORMAT_UNSUPPORTED_ADD_ITS_SIZE_IN_MAKE_PIPELINE: &CStr =
         c"error601";
+    pub const MATERIAL_HAS_MORE_THAN_4_VERTEX_ATTRIBUTES: &CStr = c"error602";
 }
 
 pub mod unknown {

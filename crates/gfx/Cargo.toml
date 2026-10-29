@@ -11,3 +11,6 @@ error-codes = { workspace = true }
 platform = { path = "../platform" }
 shader = { path = "../shader" }
 vulkan-sys = { path = "../vulkan-sys" }
+
+[build-dependencies]
+shader = { path = "../shader", features = ["build"] }

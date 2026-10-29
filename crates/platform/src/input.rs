@@ -75,3 +75,10 @@ impl Keys {
         self.0[key as usize / 64] >> (key % 64) & 1 != 0
     }
 }
+
+/// Everything `poll` keeps up to date: held keys and the cursor in window pixels (origin top-left, y down).
+#[derive(Clone, Copy, Default)]
+pub struct State {
+    pub keys: Keys,
+    pub mouse: [i32; 2],
+}

@@ -1,6 +1,8 @@
-//! Window, Vulkan and the render loop, behind a ecs API.
+//! Window, Vulkan and the render loop, behind a Bevy-ish API.
 //!
-//! Game code only touches `Mesh`, `Material`, `Transform`, `Handle`, `Assets`, `Input` and `app.run(..)`.
+//! Game code only touches `Mesh`, `Material`, `Transform`, `Color`, `Camera`, `Handle`, `Assets`, `Input` and `app.run(..)`.
+//! Rendering is instanced and GPU-culled: every frame all drawable entities go into one instance buffer, a compute
+//! shader (`cull.wgsl`) keeps the ones inside the camera view, and one indirect draw per (mesh, material) pair draws them.
 //! Edit the Vulkan below only for new kinds of mesh/material pipelines (see `Material`, `make_pipeline`).
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
@@ -17,7 +19,10 @@ use core::{
 };
 use ecs::App;
 use error_codes::prelude::*;
-use platform::{die, input::Keys};
+use platform::{
+    die,
+    input::{Keys, State},
+};
 use shader::{Align4, words};
 use vulkan_sys::*;
 
@@ -50,21 +55,32 @@ impl<T> Assets<T> {
 pub struct Mesh {
     data: Vec<u8>,
     count: u32,
+    radius2: f32, // squared bounding radius around the origin, for culling
 }
 impl Mesh {
-    /// `V` should be `#[repr(C)]` plain data.
+    /// `V` should be `#[repr(C)]` plain data whose first two `f32`s are the vertex position (used to bound the mesh).
     pub fn new<V>(verts: &[V]) -> Self {
         let bytes =
             unsafe { slice::from_raw_parts(verts.as_ptr().cast::<u8>(), size_of_val(verts)) };
+        let radius2 = verts
+            .iter()
+            .map(|v| unsafe {
+                let p = ptr::from_ref(v).cast::<f32>();
+                *p * *p + *p.add(1) * *p.add(1)
+            })
+            .fold(0.0, |a, b| if b > a { b } else { a }); // not f32::max: that links libm
         Self {
             data: bytes.to_vec(),
             count: verts.len() as u32,
+            radius2,
         }
     }
 }
 
 /// A shader plus the vertex layout it reads. One Vulkan pipeline is built per material, on first use.
-/// The vertex stage gets a `var<immediate> vec2<f32>` = the entity's `Transform`.
+/// Vertex shader contract (see `src/flat.wgsl`): mesh attributes at locations 0..`attrs.len()` (max 4),
+/// `@location(4) vec4<f32>` = x, y, scale, rotation and `@location(5) vec4<f32>` = tint (from `Transform` and `Color`),
+/// and `var<immediate> vec4<f32>` = camera x, y, half width, half height.
 pub struct Material {
     pub shader: &'static Align4<[u8]>, // entry points: vs_main, fs_main
     pub stride: u32,
@@ -88,24 +104,52 @@ pub struct Vertex {
     pub color: [f32; 3],
 }
 
-/// Clip-space translation (y up). Its bytes go straight to the shader, so keep it repr(C).
+/// World position (y up), rotation in radians (counter-clockwise) and uniform scale.
 #[repr(C)]
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy)]
 pub struct Transform {
     pub x: f32,
     pub y: f32,
+    pub rot: f32,
+    pub scale: f32,
+}
+impl Default for Transform {
+    fn default() -> Self {
+        Self::from_xy(0.0, 0.0)
+    }
 }
 impl Transform {
     pub const fn from_xy(x: f32, y: f32) -> Self {
-        Self { x, y }
+        Self {
+            x,
+            y,
+            rot: 0.0,
+            scale: 1.0,
+        }
     }
 }
 
-/// Resource: keyboard state, one `platform::input::*` key id per key (`KeyW`, `ArrowLeft`, `Space`, ...).
+/// Optional tint multiplied into the mesh's vertex colors (white when absent).
+#[derive(Clone, Copy)]
+pub struct Color(pub [f32; 3]);
+
+/// Resource: what the screen shows. `half_height` is world units from the center to the top edge;
+/// the width follows the window's aspect ratio.
+#[derive(Clone, Copy)]
+pub struct Camera {
+    pub x: f32,
+    pub y: f32,
+    pub half_height: f32,
+}
+
+/// Resource: keyboard and mouse. Keys are `platform::input::*` ids (`KeyW`, `ArrowLeft`, `Space`, ...).
 #[derive(Clone, Copy, Default)]
 pub struct Input {
     now: Keys,
     prev: Keys, // state at the previous frame
+    mouse: [i32; 2],
+    prev_mouse: [i32; 2],
+    mouse_world: [f32; 2],
 }
 impl Input {
     pub fn is_holding(&self, key: u8) -> bool {
@@ -119,6 +163,18 @@ impl Input {
     pub fn axis(&self, plus: &[u8], minus: &[u8]) -> f32 {
         let any = |ks: &[u8]| ks.iter().any(|&k| self.is_holding(k));
         any(plus) as i8 as f32 - any(minus) as i8 as f32
+    }
+    /// Cursor in window pixels, origin top-left (only updates while the cursor is over the window).
+    pub fn mouse(&self) -> [i32; 2] {
+        self.mouse
+    }
+    /// Cursor in world units, through the `Camera` of the previous frame.
+    pub fn mouse_world(&self) -> [f32; 2] {
+        self.mouse_world
+    }
+    /// True on frames where the cursor moved.
+    pub fn mouse_moved(&self) -> bool {
+        self.mouse != self.prev_mouse
     }
 }
 
@@ -350,20 +406,52 @@ unsafe fn transition(
     );
 }
 
+const GROUPS: usize = 4; // distinct (mesh, material) pairs drawn per frame
+const CAP: usize = 4096; // instances per group; must match cull.wgsl
+static CULL: &Align4<[u8]> = shader::include_shader!("cull");
+
+/// One drawable, as the culling shader and the vertex shader read it (std430: 3 x vec4).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct Inst {
+    a: [f32; 4],     // x, y, scale, rotation
+    color: [f32; 4], // tint
+    meta: [f32; 4],  // group, mesh bounding radius squared
+}
+
+#[repr(C)]
+struct CullPc {
+    view: [f32; 4],
+    count: u32,
+    _pad: [u32; 3],
+}
+
+struct Buf {
+    buf: vk::Buffer,
+    ptr: *mut u8, // mapped; null for device-local buffers
+}
+
+/// Buffers one in-flight frame owns (the CPU rewrites them while the other frame is on the GPU).
+struct Frame {
+    input: Buf,   // every drawable, written by the CPU
+    visible: Buf, // survivors of culling, per group slice (device-local, GPU only)
+    draws: Buf,   // one VkDrawIndirectCommand per group; the culling shader fills in instanceCount
+    set: vk::DescriptorSet,
+}
+
 struct GpuMesh {
     buf: vk::Buffer,
     count: u32,
 }
 
-// one host-visible buffer + allocation per mesh, never freed. Add staging/suballocation when meshes multiply.
-unsafe fn upload_mesh(c: &Ctx, m: &Mesh) -> GpuMesh {
-    let size = m.data.len() as u64;
+// one allocation per buffer, never freed. Suballocate when buffers multiply.
+unsafe fn make_buffer(c: &Ctx, size: u64, usage: vk::BufferUsageFlags, host: bool) -> Buf {
     let buf: vk::Buffer = mk(CREATE_BUFFER_FAILED, |p| {
         vkCreateBuffer(
             c.device,
             &vk::BufferCreateInfo::default()
                 .size(size)
-                .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
+                .usage(usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE),
             NA,
             p,
@@ -373,13 +461,17 @@ unsafe fn upload_mesh(c: &Ctx, m: &Mesh) -> GpuMesh {
     vkGetBufferMemoryRequirements(c.device, buf, &mut req);
     let mut props = vk::PhysicalDeviceMemoryProperties::default();
     vkGetPhysicalDeviceMemoryProperties(c.phys, &mut props);
-    let want = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+    let want = if host {
+        vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+    } else {
+        vk::MemoryPropertyFlags::DEVICE_LOCAL
+    };
     let ty = (0..props.memory_type_count)
         .find(|&i| {
             req.memory_type_bits & (1 << i) != 0
                 && props.memory_types[i as usize].property_flags.contains(want)
         })
-        .or_die(NO_HOST_VISIBLE_MEMORY_TYPE);
+        .or_die(NO_SUITABLE_MEMORY_TYPE);
     let mem: vk::DeviceMemory = mk(ALLOCATE_MEMORY_FAILED, |p| {
         vkAllocateMemory(
             c.device,
@@ -394,21 +486,37 @@ unsafe fn upload_mesh(c: &Ctx, m: &Mesh) -> GpuMesh {
         vkBindBufferMemory(c.device, buf, mem, 0),
         BIND_BUFFER_MEMORY_FAILED,
     );
-    let mut dst: *mut c_void = ptr::null_mut();
-    ck(
-        vkMapMemory(
-            c.device,
-            mem,
-            0,
-            size,
-            vk::MemoryMapFlags::empty(),
-            &mut dst,
-        ),
-        MAP_MEMORY_FAILED,
-    );
-    ptr::copy_nonoverlapping(m.data.as_ptr(), dst.cast(), m.data.len());
-    GpuMesh {
+    let mut ptr: *mut c_void = ptr::null_mut();
+    if host {
+        ck(
+            vkMapMemory(
+                c.device,
+                mem,
+                0,
+                size,
+                vk::MemoryMapFlags::empty(),
+                &mut ptr,
+            ),
+            MAP_MEMORY_FAILED,
+        );
+    }
+    Buf {
         buf,
+        ptr: ptr.cast(),
+    }
+}
+
+// meshes live in host-visible memory; add staging to device-local when meshes get big.
+unsafe fn upload_mesh(c: &Ctx, m: &Mesh) -> GpuMesh {
+    let b = make_buffer(
+        c,
+        m.data.len() as u64,
+        vk::BufferUsageFlags::VERTEX_BUFFER,
+        true,
+    );
+    ptr::copy_nonoverlapping(m.data.as_ptr(), b.ptr, m.data.len());
+    GpuMesh {
+        buf: b.buf,
         count: m.count,
     }
 }
@@ -425,18 +533,27 @@ unsafe fn make_pipeline(
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::VERTEX)
             .module(shader)
-            .name(c"v"),
+            .name(c"vs_main"),
         vk::PipelineShaderStageCreateInfo::default()
             .stage(vk::ShaderStageFlags::FRAGMENT)
             .module(shader)
-            .name(c"f"),
+            .name(c"fs_main"),
     ];
 
-    let binds = [vk::VertexInputBindingDescription::default()
-        .stride(m.stride)
-        .input_rate(vk::VertexInputRate::VERTEX)];
+    if m.attrs.len() > 4 {
+        die(MATERIAL_HAS_MORE_THAN_4_VERTEX_ATTRIBUTES);
+    }
+    let binds = [
+        vk::VertexInputBindingDescription::default()
+            .stride(m.stride)
+            .input_rate(vk::VertexInputRate::VERTEX),
+        vk::VertexInputBindingDescription::default()
+            .binding(1)
+            .stride(size_of::<Inst>() as u32)
+            .input_rate(vk::VertexInputRate::INSTANCE),
+    ];
     let mut offset = 0;
-    let attrs: Vec<_> = m
+    let mut attrs: Vec<_> = m
         .attrs
         .iter()
         .enumerate()
@@ -455,6 +572,15 @@ unsafe fn make_pipeline(
             a
         })
         .collect();
+    for (loc, off) in [(4, 0), (5, 16)] {
+        attrs.push(
+            vk::VertexInputAttributeDescription::default()
+                .location(loc)
+                .binding(1)
+                .format(vk::Format::R32G32B32A32_SFLOAT)
+                .offset(off),
+        );
+    }
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&binds)
         .vertex_attribute_descriptions(&attrs);
@@ -518,6 +644,11 @@ unsafe fn run(mut app: App, title: &CStr) {
     app.world.insert_resource(Assets::<Mesh>::default());
     app.world.insert_resource(Assets::<Material>::default());
     app.world.insert_resource(Input::default());
+    app.world.insert_resource(Camera {
+        x: 0.0,
+        y: 0.0,
+        half_height: 1.0,
+    });
 
     let w = platform::open(WIDTH, HEIGHT, title);
     let vkapp = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
@@ -585,9 +716,10 @@ unsafe fn run(mut app: App, title: &CStr) {
 
     let mut sc = make_swapchain(&ctx, vk::SwapchainKHR::null());
 
+    // graphics: the camera view is the only push constant
     let push = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX)
-        .size(size_of::<Transform>() as u32)];
+        .size(size_of::<[f32; 4]>() as u32)];
     let layout: vk::PipelineLayout = mk(CREATE_PIPELINE_LAYOUT_FAILED, |p| {
         vkCreatePipelineLayout(
             device,
@@ -595,6 +727,120 @@ unsafe fn run(mut app: App, title: &CStr) {
             NA,
             p,
         )
+    });
+
+    // culling: 3 storage buffers (input, visible, draws) + view/count as push constants
+    let set_binds: [vk::DescriptorSetLayoutBinding; 3] = core::array::from_fn(|i| {
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(i as u32)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+    });
+    let set_layout: vk::DescriptorSetLayout = mk(CREATE_DESCRIPTOR_SET_LAYOUT_FAILED, |p| {
+        vkCreateDescriptorSetLayout(
+            device,
+            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_binds),
+            NA,
+            p,
+        )
+    });
+    let cull_push = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::COMPUTE)
+        .size(size_of::<CullPc>() as u32)];
+    let set_layouts = [set_layout];
+    let cull_layout: vk::PipelineLayout = mk(CREATE_PIPELINE_LAYOUT_FAILED, |p| {
+        vkCreatePipelineLayout(
+            device,
+            &vk::PipelineLayoutCreateInfo::default()
+                .set_layouts(&set_layouts)
+                .push_constant_ranges(&cull_push),
+            NA,
+            p,
+        )
+    });
+    let cull_module = shader_module(device, CULL);
+    let mut cull_pipe = vk::Pipeline::default();
+    ck(
+        vkCreateComputePipelines(
+            device,
+            vk::PipelineCache::null(),
+            1,
+            &vk::ComputePipelineCreateInfo::default()
+                .stage(
+                    vk::PipelineShaderStageCreateInfo::default()
+                        .stage(vk::ShaderStageFlags::COMPUTE)
+                        .module(cull_module)
+                        .name(c"cull"),
+                )
+                .layout(cull_layout),
+            NA,
+            &mut cull_pipe,
+        ),
+        CREATE_COMPUTE_PIPELINES_FAILED,
+    );
+    vkDestroyShaderModule(device, cull_module, NA);
+
+    let pool_sizes = [vk::DescriptorPoolSize::default()
+        .ty(vk::DescriptorType::STORAGE_BUFFER)
+        .descriptor_count(3 * FRAMES as u32)];
+    let dpool: vk::DescriptorPool = mk(CREATE_DESCRIPTOR_POOL_FAILED, |p| {
+        vkCreateDescriptorPool(
+            device,
+            &vk::DescriptorPoolCreateInfo::default()
+                .max_sets(FRAMES as u32)
+                .pool_sizes(&pool_sizes),
+            NA,
+            p,
+        )
+    });
+    let all_layouts = [set_layout; FRAMES];
+    let mut sets = [vk::DescriptorSet::default(); FRAMES];
+    ck(
+        vkAllocateDescriptorSets(
+            device,
+            &vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(dpool)
+                .set_layouts(&all_layouts),
+            sets.as_mut_ptr(),
+        ),
+        ALLOCATE_DESCRIPTOR_SETS_FAILED,
+    );
+    let frames: [Frame; FRAMES] = core::array::from_fn(|f| {
+        let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
+        let inst_bytes = (GROUPS * CAP * size_of::<Inst>()) as u64;
+        let input = make_buffer(&ctx, inst_bytes, storage, true);
+        let visible = make_buffer(
+            &ctx,
+            inst_bytes,
+            storage | vk::BufferUsageFlags::VERTEX_BUFFER,
+            false,
+        );
+        let draws = make_buffer(
+            &ctx,
+            (GROUPS * size_of::<[u32; 4]>()) as u64,
+            storage | vk::BufferUsageFlags::INDIRECT_BUFFER,
+            true,
+        );
+        let infos = [input.buf, visible.buf, draws.buf].map(|b| {
+            [vk::DescriptorBufferInfo::default()
+                .buffer(b)
+                .range(vk::WHOLE_SIZE)]
+        });
+        let writes: [vk::WriteDescriptorSet; 3] = core::array::from_fn(|i| {
+            vk::WriteDescriptorSet::default()
+                .dst_set(sets[f])
+                .dst_binding(i as u32)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(&infos[i])
+        });
+        vkUpdateDescriptorSets(device, 3, writes.as_ptr(), 0, ptr::null());
+        Frame {
+            input,
+            visible,
+            draws,
+            set: sets[f],
+        }
     });
 
     let pool: vk::CommandPool = mk(CREATE_COMMAND_POOL_FAILED, |p| {
@@ -625,7 +871,7 @@ unsafe fn run(mut app: App, title: &CStr) {
         })
     });
     let fences: [vk::Fence; FRAMES] = core::array::from_fn(|_| {
-        mk(CREATE_SEMAPHORE_FAILED, |p| {
+        mk(CREATE_FENCE_FAILED, |p| {
             vkCreateFence(
                 device,
                 &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
@@ -638,20 +884,28 @@ unsafe fn run(mut app: App, title: &CStr) {
     let mut resized = false;
     let mut shown = false;
     let mut frame = 0usize;
-    let mut keys = Keys::default();
+    let mut state = State::default();
     let (mut gpu_meshes, mut pipes): (Vec<Option<GpuMesh>>, Vec<Option<vk::Pipeline>>) =
         (Vec::new(), Vec::new());
     let mut last = platform::now();
 
     loop {
-        if !platform::poll(&w, &mut resized, &mut keys) {
+        if !platform::poll(&w, &mut resized, &mut state) {
             break;
         }
         let now = platform::now();
         let dt = (now - last) as f32;
         last = now;
+        let cam = *app.world.resource::<Camera>().unwrap();
+        let (ew, eh) = (sc.extent.width as f32, sc.extent.height as f32);
         let input = app.world.resource_mut::<Input>().unwrap();
-        (input.prev, input.now) = (input.now, keys);
+        (input.prev, input.now) = (input.now, state.keys);
+        (input.prev_mouse, input.mouse) = (input.mouse, state.mouse);
+        // window pixels (y down) -> world units (y up)
+        input.mouse_world = [
+            cam.x + (2.0 * state.mouse[0] as f32 / ew - 1.0) * cam.half_height * ew / eh,
+            cam.y + (1.0 - 2.0 * state.mouse[1] as f32 / eh) * cam.half_height,
+        ];
         app.run_frame(dt);
 
         ck(
@@ -702,6 +956,96 @@ unsafe fn run(mut app: App, title: &CStr) {
             ),
             BEGIN_COMMAND_BUFFER_FAILED,
         );
+
+        // ---- collect drawables, then cull them on the GPU
+        let fr = &frames[frame];
+        let world = &app.world;
+        let meshes = world.resource::<Assets<Mesh>>().unwrap();
+        let mats = world.resource::<Assets<Material>>().unwrap();
+        let cam = *world.resource::<Camera>().unwrap();
+        let half_w = cam.half_height * sc.extent.width as f32 / sc.extent.height as f32;
+        let view = [cam.x, cam.y, half_w, cam.half_height];
+
+        let mut groups: Vec<(usize, usize)> = Vec::new(); // (mesh, material) per group
+        let mut counts = [0usize; GROUPS];
+        let mut n = 0;
+        for e in world.query_of::<(Transform, Handle<Mesh>, Handle<Material>)>() {
+            let mi = world.get::<Handle<Mesh>>(e).unwrap().0 as usize;
+            let ma = world.get::<Handle<Material>>(e).unwrap().0 as usize;
+            let g = match groups.iter().position(|&x| x == (mi, ma)) {
+                Some(g) => g,
+                None if groups.len() < GROUPS => {
+                    groups.push((mi, ma));
+                    groups.len() - 1
+                }
+                None => continue, // extra (mesh, material) pairs are dropped; raise GROUPS
+            };
+            if counts[g] == CAP {
+                continue; // extra instances are dropped; raise CAP (and cull.wgsl's)
+            }
+            counts[g] += 1;
+            let t = world.get::<Transform>(e).unwrap();
+            let c = world.get::<Color>(e).map_or([1.0; 3], |c| c.0);
+            fr.input.ptr.cast::<Inst>().add(n).write(Inst {
+                a: [t.x, t.y, t.scale, t.rot],
+                color: [c[0], c[1], c[2], 1.0],
+                meta: [g as f32, meshes.0[mi].radius2, 0.0, 0.0],
+            });
+            n += 1;
+        }
+        for (g, &(mi, _)) in groups.iter().enumerate() {
+            let m = slot(&mut gpu_meshes, mi, || upload_mesh(&ctx, &meshes.0[mi]));
+            // instanceCount starts at 0; the culling shader counts survivors
+            fr.draws
+                .ptr
+                .cast::<[u32; 4]>()
+                .add(g)
+                .write([m.count, 0, 0, 0]);
+        }
+        if n > 0 {
+            vkCmdBindPipeline(cmd, vk::PipelineBindPoint::COMPUTE, cull_pipe);
+            vkCmdBindDescriptorSets(
+                cmd,
+                vk::PipelineBindPoint::COMPUTE,
+                cull_layout,
+                0,
+                1,
+                &fr.set,
+                0,
+                ptr::null(),
+            );
+            let pc = CullPc {
+                view,
+                count: n as u32,
+                _pad: [0; 3],
+            };
+            vkCmdPushConstants(
+                cmd,
+                cull_layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                size_of::<CullPc>() as u32,
+                ptr::from_ref(&pc).cast(),
+            );
+            vkCmdDispatch(cmd, (n as u32).div_ceil(64), 1, 1);
+            let barrier = [vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                .dst_access_mask(
+                    vk::AccessFlags::INDIRECT_COMMAND_READ | vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+                )];
+            vkCmdPipelineBarrier(
+                cmd,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::VERTEX_INPUT,
+                vk::DependencyFlags::empty(),
+                1,
+                barrier.as_ptr(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+            );
+        }
 
         transition(
             cmd,
@@ -755,29 +1099,25 @@ unsafe fn run(mut app: App, title: &CStr) {
             },
         );
         vkCmdSetScissor(cmd, 0, 1, &area);
-        let world = &app.world;
-        let meshes = world.resource::<Assets<Mesh>>().unwrap();
-        let mats = world.resource::<Assets<Material>>().unwrap();
-        for e in world.query_of::<(Transform, Handle<Mesh>, Handle<Material>)>() {
-            let t = world.get::<Transform>(e).unwrap();
-            let mi = world.get::<Handle<Mesh>>(e).unwrap().0 as usize;
-            let ma = world.get::<Handle<Material>>(e).unwrap().0 as usize;
-            // rebinds per draw; sort by material when draw counts matter.
+        for (g, &(mi, ma)) in groups.iter().enumerate() {
+            // one pipeline bind per group; fine while groups are few.
             let pipe = *slot(&mut pipes, ma, || {
                 make_pipeline(&ctx, layout, sc.format, &mats.0[ma])
             });
-            let m = slot(&mut gpu_meshes, mi, || upload_mesh(&ctx, &meshes.0[mi]));
+            let m = gpu_meshes[mi].as_ref().unwrap();
             vkCmdBindPipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
             vkCmdPushConstants(
                 cmd,
                 layout,
                 vk::ShaderStageFlags::VERTEX,
                 0,
-                size_of::<Transform>() as u32,
-                ptr::from_ref(t).cast(),
+                size_of::<[f32; 4]>() as u32,
+                view.as_ptr().cast(),
             );
-            vkCmdBindVertexBuffers(cmd, 0, 1, &m.buf, &0);
-            vkCmdDraw(cmd, m.count, 1, 0, 0);
+            let bufs = [m.buf, fr.visible.buf];
+            let offs = [0, (g * CAP * size_of::<Inst>()) as u64];
+            vkCmdBindVertexBuffers(cmd, 0, 2, bufs.as_ptr(), offs.as_ptr());
+            vkCmdDrawIndirect(cmd, fr.draws.buf, (g * size_of::<[u32; 4]>()) as u64, 1, 16);
         }
         vkCmdEndRendering(cmd);
 

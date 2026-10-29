@@ -4,7 +4,7 @@
 
 use ash::{khr, vk};
 use core::{ffi::CStr, ptr};
-use error_codes::vulkan_setup::CREATE_SURFACE_FAILED;
+use error_codes::prelude::*;
 use vulkan_sys::*;
 
 pub mod input;

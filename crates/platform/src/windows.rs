@@ -5,7 +5,6 @@ use core::{
     ffi::c_void,
     sync::atomic::{AtomicBool, Ordering::Relaxed},
 };
-use error_codes::windows::*;
 use win32_sys::*;
 
 pub const SURFACE_EXT: &CStr = khr::win32_surface::NAME;
@@ -146,18 +145,22 @@ pub fn now() -> f64 {
     t as f64 / f as f64
 }
 
-/// Drain pending messages (sleeping while minimized); false means the user asked to quit. `keys` is kept up to date with the held keys.
-pub unsafe fn poll(w: &Window, resized: &mut bool, keys: &mut input::Keys) -> bool {
+/// Drain pending messages (sleeping while minimized); false means the user asked to quit. `state` is kept up to date with the held keys and the cursor.
+pub unsafe fn poll(w: &Window, resized: &mut bool, state: &mut input::State) -> bool {
     loop {
         let mut m: Msg = core::mem::zeroed();
         while PeekMessageA(&mut m, 0, 0, 0, PM_REMOVE) != 0 {
             if m.message == WM_KEYDOWN && m.wparam == VK_ESCAPE {
                 return false;
             }
+            if m.message == WM_MOUSEMOVE {
+                // lparam: x in the low word, y in the high word, both signed
+                state.mouse = [m.lparam as i16 as i32, (m.lparam >> 16) as i16 as i32];
+            }
             if let Some(k) = key_of(&m) {
                 match m.message {
-                    WM_KEYDOWN | WM_SYSKEYDOWN => keys.set(k, true),
-                    WM_KEYUP | WM_SYSKEYUP => keys.set(k, false),
+                    WM_KEYDOWN | WM_SYSKEYDOWN => state.keys.set(k, true),
+                    WM_KEYUP | WM_SYSKEYUP => state.keys.set(k, false),
                     _ => {}
                 }
             }
