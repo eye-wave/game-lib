@@ -8,9 +8,14 @@ target := if os_family() == "windows" {
 }
 
 exe := if os_family() == "windows" { ".exe" } else { "" }
+extra := if os_family() == "windows" {
+    "-Zbuild-std-features=compiler-builtins-mem"
+} else {
+    ""
+}
 
 build app="example-3d":
-    cargo build --release -p "{{app}}" --target {{target}}
+    cargo build --release -p {{quote(app)}} --target {{target}} {{extra}}
     if [ "{{os_family()}}" = "windows" ]; then \
         llvm-strip --strip-all "target/{{target}}/release/{{app}}{{exe}}" || true; \
         signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f "$PFX" /p "$PFX_PASS" "target/{{target}}/release/{{app}}{{exe}}"; \
