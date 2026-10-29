@@ -20,6 +20,7 @@ rustflags = [
 rustflags = [
     "-Zlocation-detail=none",
     "-Zfmt-debug=none",
+    "-Zbuild-std-features=compiler-builtins-mem",
     "-C", "link-arg=/ENTRY:start",
     "-C", "link-arg=/NODEFAULTLIB",
     "-C", "link-arg=/SUBSYSTEM:WINDOWS",

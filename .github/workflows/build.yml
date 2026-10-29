@@ -12,10 +12,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            bin: stupid-game
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            bin: stupid-game.exe
 
     runs-on: ${{ matrix.os }}
 
@@ -40,7 +38,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y spirv-tools libvulkan1 libxcb1
+          sudo apt-get install -y spirv-tools libvulkan1 libxcb1 zip
 
       - name: Build sstrip
         if: runner.os == 'Linux'
@@ -49,10 +47,22 @@ jobs:
           make -C ELFkickers
           sudo install -m755 "$(find ELFkickers -name sstrip -type f -perm -u+x | head -1)" /usr/local/bin/sstrip
 
-      - name: Build
-        run: just build stupid-game
+      - name: Build bundle
+        run: just bundle
+
+      - name: Archive bundle (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cd target
+          zip -r bundle-${{ matrix.target }}.zip bundle
+
+      - name: Archive bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/bundle/* -DestinationPath target/bundle-${{ matrix.target }}.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: stupid-game-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/${{ matrix.bin }}
+          name: bundle-${{ matrix.target }}
+          path: target/bundle-${{ matrix.target }}.zip
