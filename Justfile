@@ -1,5 +1,5 @@
 set quiet
-set shell := ["bash", "-cu"]
+set shell := ["bash", "-cue"]
 
 target := if os_family() == "windows" {
     "x86_64-pc-windows-msvc"
@@ -18,7 +18,9 @@ build app="example-3d":
     cargo build --release -p {{quote(app)}} --target {{target}} {{extra}}
     if [ "{{os_family()}}" = "windows" ]; then \
         llvm-strip --strip-all "target/{{target}}/release/{{app}}{{exe}}" || true; \
-        signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f "$PFX" /p "$PFX_PASS" "target/{{target}}/release/{{app}}{{exe}}"; \
+        if [ -n "${PFX:-}" ]; then \
+            MSYS2_ARG_CONV_EXCL='*' signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f "$PFX" /p "${PFX_PASS:-}" "target/{{target}}/release/{{app}}{{exe}}"; \
+        fi; \
     else \
         strip --strip-all \
             -R .comment \
@@ -31,23 +33,13 @@ build app="example-3d":
 app name:
     just build "{{name}}"
 
-
 bundle app="" dir="target/bundle":
-    #!/usr/bin/env bash
-    set -euo pipefail
     mkdir -p "{{dir}}"
-
-    for path in apps/*/; do
-        name="${path%/}"
-        name="${name##*/}"
-
-        if [ -n "{{app}}" ] && [ "$name" != "{{app}}" ]; then
-            continue
-        fi
-
-        just build "$name"
-        cp "target/{{target}}/release/$name{{exe}}" "{{dir}}/"
+    for path in apps/*/; do \
+        name="${path%/}"; name="${name##*/}"; \
+        if [ -n "{{app}}" ] && [ "$name" != "{{app}}" ]; then continue; fi; \
+        just build "$name"; \
+        cp "target/{{target}}/release/$name{{exe}}" "{{dir}}/"; \
     done
-
     echo "Bundled apps:"
     ls -lh "{{dir}}"

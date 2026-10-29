@@ -24,5 +24,4 @@ rustflags = [
     "-C", "link-arg=/NODEFAULTLIB",
     "-C", "link-arg=/SUBSYSTEM:WINDOWS",
     "-C", "link-arg=/OPT:REF,ICF",
-    "-C", "link-arg=/EMITPDBALTPATH:none",
 ]
