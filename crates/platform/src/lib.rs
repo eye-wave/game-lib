@@ -4,7 +4,7 @@
 
 use ash::{khr, vk};
 use core::{ffi::CStr, ptr};
-use error_codes::prelude::*;
+use errors::prelude::*;
 use vulkan_sys::*;
 
 pub mod input;

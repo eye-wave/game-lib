@@ -278,6 +278,31 @@ unsafe extern "system" {
         n: u32,
         stride: u32,
     );
+    pub fn vkCreateImage(
+        d: vk::Device,
+        c: *const vk::ImageCreateInfo<'_>,
+        a: A,
+        o: *mut vk::Image,
+    ) -> vk::Result;
+    pub fn vkGetImageMemoryRequirements(
+        d: vk::Device,
+        i: vk::Image,
+        o: *mut vk::MemoryRequirements,
+    );
+    pub fn vkBindImageMemory(
+        d: vk::Device,
+        i: vk::Image,
+        m: vk::DeviceMemory,
+        off: vk::DeviceSize,
+    ) -> vk::Result;
+    pub fn vkDestroyImage(d: vk::Device, i: vk::Image, a: A);
+    pub fn vkFreeMemory(d: vk::Device, m: vk::DeviceMemory, a: A);
+    pub fn vkCreateSampler(
+        d: vk::Device,
+        c: *const vk::SamplerCreateInfo<'_>,
+        a: A,
+        o: *mut vk::Sampler,
+    ) -> vk::Result;
     pub fn vkQueueSubmit(
         q: vk::Queue,
         n: u32,

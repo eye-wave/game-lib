@@ -34,6 +34,9 @@ pub mod vulkan_resources {
     pub const CREATE_DESCRIPTOR_SET_LAYOUT_FAILED: &CStr = c"error215";
     pub const CREATE_DESCRIPTOR_POOL_FAILED: &CStr = c"error216";
     pub const ALLOCATE_DESCRIPTOR_SETS_FAILED: &CStr = c"error217";
+    pub const CREATE_IMAGE_FAILED: &CStr = c"error218";
+    pub const BIND_IMAGE_MEMORY_FAILED: &CStr = c"error219";
+    pub const CREATE_SAMPLER_FAILED: &CStr = c"error220";
 }
 
 pub mod vulkan_rendering {

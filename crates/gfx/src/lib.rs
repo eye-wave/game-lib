@@ -1,13 +1,15 @@
-//! Window, Vulkan and the render loop, behind a Bevy-ish API.
+//! Window, Vulkan and the 3D render loop, behind a Bevy-ish API.
 //!
 //! Game code only touches `Mesh`, `Material`, `Transform`, `Color`, `Camera`, `Handle`, `Assets`, `Input` and `app.run(..)`.
 //! Rendering is instanced and GPU-culled: every frame all drawable entities go into one instance buffer, a compute
-//! shader (`cull.wgsl`) keeps the ones inside the camera view, and one indirect draw per (mesh, material) pair draws them.
-//! Edit the Vulkan below only for new kinds of mesh/material pipelines (see `Material`, `make_pipeline`).
+//! shader (`cull.wgsl`) keeps the ones inside the camera frustum, and one indirect draw per (mesh, material) pair draws
+//! them into an offscreen target (with depth). A fullscreen post-process pass (`PostProcess`) then writes the swapchain.
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
 extern crate alloc;
+
+pub mod math;
 
 use alloc::vec::Vec;
 use ash::khr;
@@ -18,7 +20,8 @@ use core::{
     ptr, slice,
 };
 use ecs::App;
-use error_codes::prelude::*;
+use errors::prelude::*;
+use math::{cos, sin};
 use platform::{
     die,
     input::{Keys, State},
@@ -58,7 +61,7 @@ pub struct Mesh {
     radius2: f32, // squared bounding radius around the origin, for culling
 }
 impl Mesh {
-    /// `V` should be `#[repr(C)]` plain data whose first two `f32`s are the vertex position (used to bound the mesh).
+    /// `V` should be `#[repr(C)]` plain data whose first three `f32`s are the vertex position (used to bound the mesh).
     pub fn new<V>(verts: &[V]) -> Self {
         let bytes =
             unsafe { slice::from_raw_parts(verts.as_ptr().cast::<u8>(), size_of_val(verts)) };
@@ -66,7 +69,7 @@ impl Mesh {
             .iter()
             .map(|v| unsafe {
                 let p = ptr::from_ref(v).cast::<f32>();
-                *p * *p + *p.add(1) * *p.add(1)
+                *p * *p + *p.add(1) * *p.add(1) + *p.add(2) * *p.add(2)
             })
             .fold(0.0, |a, b| if b > a { b } else { a }); // not f32::max: that links libm
         Self {
@@ -78,53 +81,52 @@ impl Mesh {
 }
 
 /// A shader plus the vertex layout it reads. One Vulkan pipeline is built per material, on first use.
-/// Vertex shader contract (see `src/flat.wgsl`): mesh attributes at locations 0..`attrs.len()` (max 4),
-/// `@location(4) vec4<f32>` = x, y, scale, rotation and `@location(5) vec4<f32>` = tint (from `Transform` and `Color`),
-/// and `var<immediate> vec4<f32>` = camera x, y, half width, half height.
+/// Vertex shader contract (see `src/lit.wgsl`): mesh attributes at locations 0..`attrs.len()` (max 4),
+/// `@location(4) vec4<f32>` = x, y, z, yaw, `@location(5) vec4<f32>` = scale xyz, `@location(6) vec4<f32>` = tint rgb
+/// (from `Transform` and `Color`), and `var<immediate> mat4x4<f32>` = view * projection.
 pub struct Material {
     pub shader: &'static Align4<[u8]>, // entry points: vs_main, fs_main
     pub stride: u32,
     pub attrs: &'static [vk::Format], // tightly packed, location = index
 }
 impl Material {
-    /// For `Vertex`: location 0 = pos, location 1 = color.
-    pub const fn colored(shader: &'static Align4<[u8]>) -> Self {
+    /// For `Vertex`: location 0 = pos, 1 = normal, 2 = color.
+    pub const fn lit(shader: &'static Align4<[u8]>) -> Self {
         Self {
             shader,
             stride: size_of::<Vertex>() as u32,
-            attrs: &[vk::Format::R32G32_SFLOAT, vk::Format::R32G32B32_SFLOAT],
+            attrs: &[vk::Format::R32G32B32_SFLOAT; 3],
         }
     }
 }
 
-/// 2D position + RGB color, the vertex of `Material::colored`.
+/// Position, normal and color: the vertex of `Material::lit`.
 #[repr(C)]
 pub struct Vertex {
-    pub pos: [f32; 2],
+    pub pos: [f32; 3],
+    pub normal: [f32; 3],
     pub color: [f32; 3],
 }
 
-/// World position (y up), rotation in radians (counter-clockwise) and uniform scale.
+/// World position (y up), rotation about the y axis in radians, and per-axis scale.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Transform {
-    pub x: f32,
-    pub y: f32,
-    pub rot: f32,
-    pub scale: f32,
+    pub pos: [f32; 3],
+    pub yaw: f32,
+    pub scale: [f32; 3],
 }
 impl Default for Transform {
     fn default() -> Self {
-        Self::from_xy(0.0, 0.0)
+        Self::from_pos(0.0, 0.0, 0.0)
     }
 }
 impl Transform {
-    pub const fn from_xy(x: f32, y: f32) -> Self {
+    pub const fn from_pos(x: f32, y: f32, z: f32) -> Self {
         Self {
-            x,
-            y,
-            rot: 0.0,
-            scale: 1.0,
+            pos: [x, y, z],
+            yaw: 0.0,
+            scale: [1.0; 3],
         }
     }
 }
@@ -133,23 +135,44 @@ impl Transform {
 #[derive(Clone, Copy)]
 pub struct Color(pub [f32; 3]);
 
-/// Resource: what the screen shows. `half_height` is world units from the center to the top edge;
-/// the width follows the window's aspect ratio.
+/// Resource: the viewpoint. Right-handed, y up; at yaw 0 and pitch 0 it looks down -z, and a positive yaw turns left.
+/// `focal` is 1 / tan(vertical fov / 2). `sky` is the clear color.
 #[derive(Clone, Copy)]
 pub struct Camera {
-    pub x: f32,
-    pub y: f32,
-    pub half_height: f32,
+    pub pos: [f32; 3],
+    pub yaw: f32,
+    pub pitch: f32,
+    pub focal: f32,
+    pub near: f32,
+    pub far: f32,
+    pub sky: [f32; 3],
+}
+impl Default for Camera {
+    fn default() -> Self {
+        Self {
+            pos: [0.0; 3],
+            yaw: 0.0,
+            pitch: 0.0,
+            focal: 1.428, // 70 degrees
+            near: 0.1,
+            far: 200.0,
+            sky: [0.53, 0.68, 0.85],
+        }
+    }
 }
 
+/// Resource: the fullscreen post-processing shader (contract in `crates/gfx/src/post.wgsl`).
+/// `None` is a passthrough. It is built the first time it is seen, so set it any time before drawing.
+#[derive(Clone, Copy, Default)]
+pub struct PostProcess(pub Option<&'static Align4<[u8]>>);
+
 /// Resource: keyboard and mouse. Keys are `platform::input::*` ids (`KeyW`, `ArrowLeft`, `Space`, ...).
+/// The cursor is kept at the window center, so the mouse only reports motion (`mouse_delta`): mouse look.
 #[derive(Clone, Copy, Default)]
 pub struct Input {
     now: Keys,
     prev: Keys, // state at the previous frame
-    mouse: [i32; 2],
-    prev_mouse: [i32; 2],
-    mouse_world: [f32; 2],
+    delta: [f32; 2],
 }
 impl Input {
     pub fn is_holding(&self, key: u8) -> bool {
@@ -164,17 +187,9 @@ impl Input {
         let any = |ks: &[u8]| ks.iter().any(|&k| self.is_holding(k));
         any(plus) as i8 as f32 - any(minus) as i8 as f32
     }
-    /// Cursor in window pixels, origin top-left (only updates while the cursor is over the window).
-    pub fn mouse(&self) -> [i32; 2] {
-        self.mouse
-    }
-    /// Cursor in world units, through the `Camera` of the previous frame.
-    pub fn mouse_world(&self) -> [f32; 2] {
-        self.mouse_world
-    }
-    /// True on frames where the cursor moved.
-    pub fn mouse_moved(&self) -> bool {
-        self.mouse != self.prev_mouse
+    /// Mouse motion since the last frame in pixels (x right, y down).
+    pub fn mouse_delta(&self) -> [f32; 2] {
+        self.delta
     }
 }
 
@@ -261,11 +276,24 @@ struct Swapchain {
     images: Vec<vk::Image>,
     views: Vec<vk::ImageView>,
     render_done: Vec<vk::Semaphore>,
+    scene: Target, // offscreen color the scene is drawn into
+    depth: Target,
+}
+
+/// An image the renderer owns, with its memory and view.
+struct Target {
+    image: vk::Image,
+    view: vk::ImageView,
+    mem: vk::DeviceMemory,
 }
 
 fn color_range() -> vk::ImageSubresourceRange {
+    range(vk::ImageAspectFlags::COLOR)
+}
+
+fn range(aspect: vk::ImageAspectFlags) -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
-        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .aspect_mask(aspect)
         .level_count(1)
         .layer_count(1)
 }
@@ -363,7 +391,72 @@ unsafe fn make_swapchain(c: &Ctx, old: vk::SwapchainKHR) -> Swapchain {
         images,
         views,
         render_done,
+        scene: make_target(
+            c,
+            extent,
+            SCENE_FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageAspectFlags::COLOR,
+        ),
+        depth: make_target(
+            c,
+            extent,
+            DEPTH_FORMAT,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            vk::ImageAspectFlags::DEPTH,
+        ),
     }
+}
+
+unsafe fn make_target(
+    c: &Ctx,
+    e: vk::Extent2D,
+    format: vk::Format,
+    usage: vk::ImageUsageFlags,
+    aspect: vk::ImageAspectFlags,
+) -> Target {
+    let image: vk::Image = mk(CREATE_IMAGE_FAILED, |p| {
+        vkCreateImage(
+            c.device,
+            &vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(format)
+                .extent(vk::Extent3D {
+                    width: e.width,
+                    height: e.height,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .initial_layout(vk::ImageLayout::UNDEFINED),
+            NA,
+            p,
+        )
+    });
+    let mut req = vk::MemoryRequirements::default();
+    vkGetImageMemoryRequirements(c.device, image, &mut req);
+    let mem = alloc_mem(c, req, false);
+    ck(
+        vkBindImageMemory(c.device, image, mem, 0),
+        BIND_IMAGE_MEMORY_FAILED,
+    );
+    let view = mk(CREATE_IMAGE_VIEW_FAILED, |p| {
+        vkCreateImageView(
+            c.device,
+            &vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(format)
+                .subresource_range(range(aspect)),
+            NA,
+            p,
+        )
+    });
+    Target { image, view, mem }
 }
 
 unsafe fn destroy_swapchain(c: &Ctx, sc: &Swapchain) {
@@ -373,12 +466,18 @@ unsafe fn destroy_swapchain(c: &Ctx, sc: &Swapchain) {
     for &v in &sc.views {
         vkDestroyImageView(c.device, v, NA);
     }
+    for t in [&sc.scene, &sc.depth] {
+        vkDestroyImageView(c.device, t.view, NA);
+        vkDestroyImage(c.device, t.image, NA);
+        vkFreeMemory(c.device, t.mem, NA);
+    }
     vkDestroySwapchainKHR(c.device, sc.handle, NA);
 }
 
 unsafe fn transition(
     cmd: vk::CommandBuffer,
     image: vk::Image,
+    aspect: vk::ImageAspectFlags,
     (old, new): (vk::ImageLayout, vk::ImageLayout),
     (src_stage, dst_stage): (vk::PipelineStageFlags, vk::PipelineStageFlags),
     (src_access, dst_access): (vk::AccessFlags, vk::AccessFlags),
@@ -389,7 +488,7 @@ unsafe fn transition(
         .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
         .image(image)
-        .subresource_range(color_range())
+        .subresource_range(range(aspect))
         .src_access_mask(src_access)
         .dst_access_mask(dst_access);
     vkCmdPipelineBarrier(
@@ -408,22 +507,45 @@ unsafe fn transition(
 
 const GROUPS: usize = 4; // distinct (mesh, material) pairs drawn per frame
 const CAP: usize = 4096; // instances per group; must match cull.wgsl
+const SCENE_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM; // offscreen color, sampled by the post pass
+const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 static CULL: &Align4<[u8]> = shader::include_shader!("cull");
+static POST: &Align4<[u8]> = shader::include_shader!("post");
 
 /// One drawable, as the culling shader and the vertex shader read it (std430: 3 x vec4).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Inst {
-    a: [f32; 4],     // x, y, scale, rotation
-    color: [f32; 4], // tint
-    meta: [f32; 4],  // group, mesh bounding radius squared
+    a: [f32; 4],     // x, y, z, yaw
+    s: [f32; 4],     // scale xyz, group
+    color: [f32; 4], // tint rgb, mesh bounding radius squared
 }
 
 #[repr(C)]
 struct CullPc {
-    view: [f32; 4],
+    vp: [f32; 16],
     count: u32,
     _pad: [u32; 3],
+}
+
+/// View * projection, column-major, depth range 0..1 (see `Camera` for the conventions).
+fn view_proj(c: &Camera, aspect: f32) -> [f32; 16] {
+    let (sy, cy, sp, cp) = (sin(c.yaw), cos(c.yaw), sin(c.pitch), cos(c.pitch));
+    let f = [-sy * cp, sp, -cy * cp]; // forward
+    let r = [cy, 0.0, -sy]; // right
+    let u = [sp * sy, cp, sp * cy]; // up
+    let dot = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let (fx, fy) = (c.focal / aspect, c.focal);
+    let a = c.far / (c.near - c.far);
+    let b = c.near * c.far / (c.near - c.far);
+    let (fp, p) = (dot(f, c.pos), c.pos);
+    let rows = [
+        [r[0] * fx, r[1] * fx, r[2] * fx, -dot(r, p) * fx],
+        [u[0] * fy, u[1] * fy, u[2] * fy, -dot(u, p) * fy],
+        [-f[0] * a, -f[1] * a, -f[2] * a, fp * a + b],
+        [f[0], f[1], f[2], -fp],
+    ];
+    core::array::from_fn(|i| rows[i % 4][i / 4]) // column-major
 }
 
 struct Buf {
@@ -444,21 +566,8 @@ struct GpuMesh {
     count: u32,
 }
 
-// one allocation per buffer, never freed. Suballocate when buffers multiply.
-unsafe fn make_buffer(c: &Ctx, size: u64, usage: vk::BufferUsageFlags, host: bool) -> Buf {
-    let buf: vk::Buffer = mk(CREATE_BUFFER_FAILED, |p| {
-        vkCreateBuffer(
-            c.device,
-            &vk::BufferCreateInfo::default()
-                .size(size)
-                .usage(usage)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE),
-            NA,
-            p,
-        )
-    });
-    let mut req = vk::MemoryRequirements::default();
-    vkGetBufferMemoryRequirements(c.device, buf, &mut req);
+/// Device memory for `req`: host-visible and coherent, or device-local.
+unsafe fn alloc_mem(c: &Ctx, req: vk::MemoryRequirements, host: bool) -> vk::DeviceMemory {
     let mut props = vk::PhysicalDeviceMemoryProperties::default();
     vkGetPhysicalDeviceMemoryProperties(c.phys, &mut props);
     let want = if host {
@@ -482,6 +591,25 @@ unsafe fn make_buffer(c: &Ctx, size: u64, usage: vk::BufferUsageFlags, host: boo
             p,
         )
     });
+    mem
+}
+
+// one allocation per buffer, never freed. Suballocate when buffers multiply.
+unsafe fn make_buffer(c: &Ctx, size: u64, usage: vk::BufferUsageFlags, host: bool) -> Buf {
+    let buf: vk::Buffer = mk(CREATE_BUFFER_FAILED, |p| {
+        vkCreateBuffer(
+            c.device,
+            &vk::BufferCreateInfo::default()
+                .size(size)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE),
+            NA,
+            p,
+        )
+    });
+    let mut req = vk::MemoryRequirements::default();
+    vkGetBufferMemoryRequirements(c.device, buf, &mut req);
+    let mem = alloc_mem(c, req, host);
     ck(
         vkBindBufferMemory(c.device, buf, mem, 0),
         BIND_BUFFER_MEMORY_FAILED,
@@ -521,25 +649,13 @@ unsafe fn upload_mesh(c: &Ctx, m: &Mesh) -> GpuMesh {
     }
 }
 
-/// The one place that turns a `Material` into Vulkan state: edit here for blending, depth, topology, extra inputs...
+/// The one place that turns a `Material` into Vulkan state: edit here for blending, culling, topology, extra inputs...
 unsafe fn make_pipeline(
     c: &Ctx,
     layout: vk::PipelineLayout,
     format: vk::Format,
     m: &Material,
 ) -> vk::Pipeline {
-    let shader = shader_module(c.device, m.shader);
-    let stages = [
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::VERTEX)
-            .module(shader)
-            .name(c"vs_main"),
-        vk::PipelineShaderStageCreateInfo::default()
-            .stage(vk::ShaderStageFlags::FRAGMENT)
-            .module(shader)
-            .name(c"fs_main"),
-    ];
-
     if m.attrs.len() > 4 {
         die(MATERIAL_HAS_MORE_THAN_4_VERTEX_ATTRIBUTES);
     }
@@ -572,7 +688,7 @@ unsafe fn make_pipeline(
             a
         })
         .collect();
-    for (loc, off) in [(4, 0), (5, 16)] {
+    for (loc, off) in [(4, 0), (5, 16), (6, 32)] {
         attrs.push(
             vk::VertexInputAttributeDescription::default()
                 .location(loc)
@@ -584,6 +700,45 @@ unsafe fn make_pipeline(
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&binds)
         .vertex_attribute_descriptions(&attrs);
+    build_pipeline(c, layout, m.shader, format, true, &vertex_input)
+}
+
+/// The fullscreen post-process pipeline: no vertex buffers, no depth.
+unsafe fn make_post_pipeline(
+    c: &Ctx,
+    layout: vk::PipelineLayout,
+    format: vk::Format,
+    shader: &'static Align4<[u8]>,
+) -> vk::Pipeline {
+    build_pipeline(
+        c,
+        layout,
+        shader,
+        format,
+        false,
+        &vk::PipelineVertexInputStateCreateInfo::default(),
+    )
+}
+
+unsafe fn build_pipeline(
+    c: &Ctx,
+    layout: vk::PipelineLayout,
+    spv: &'static Align4<[u8]>,
+    format: vk::Format,
+    depth: bool,
+    vertex_input: &vk::PipelineVertexInputStateCreateInfo,
+) -> vk::Pipeline {
+    let shader = shader_module(c.device, spv);
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(shader)
+            .name(c"vs_main"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(shader)
+            .name(c"fs_main"),
+    ];
     let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
         .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
@@ -604,15 +759,23 @@ unsafe fn make_pipeline(
     let color_formats = [format];
     let mut rendering =
         vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&color_formats);
+    if depth {
+        rendering = rendering.depth_attachment_format(DEPTH_FORMAT);
+    }
+    let depth_state = vk::PipelineDepthStencilStateCreateInfo::default()
+        .depth_test_enable(depth)
+        .depth_write_enable(depth)
+        .depth_compare_op(vk::CompareOp::LESS);
 
     let info = vk::GraphicsPipelineCreateInfo::default()
         .stages(&stages)
-        .vertex_input_state(&vertex_input)
+        .vertex_input_state(vertex_input)
         .input_assembly_state(&input_assembly)
         .viewport_state(&viewport_state)
         .rasterization_state(&raster)
         .multisample_state(&multisample)
         .color_blend_state(&blend)
+        .depth_stencil_state(&depth_state)
         .dynamic_state(&dynamic)
         .layout(layout)
         .push_next(&mut rendering);
@@ -632,6 +795,32 @@ unsafe fn make_pipeline(
     pipeline
 }
 
+/// Point the post-process descriptor set at the current scene image.
+unsafe fn write_post_set(
+    c: &Ctx,
+    set: vk::DescriptorSet,
+    sampler: vk::Sampler,
+    view: vk::ImageView,
+) {
+    let image = [vk::DescriptorImageInfo::default()
+        .image_view(view)
+        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
+    let samp = [vk::DescriptorImageInfo::default().sampler(sampler)];
+    let writes = [
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .image_info(&image),
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(1)
+            .descriptor_type(vk::DescriptorType::SAMPLER)
+            .image_info(&samp),
+    ];
+    vkUpdateDescriptorSets(c.device, 2, writes.as_ptr(), 0, ptr::null());
+}
+
 /// Cache slot `i`, building it with `f` the first time.
 fn slot<T>(v: &mut Vec<Option<T>>, i: usize, f: impl FnOnce() -> T) -> &T {
     if v.len() <= i {
@@ -644,11 +833,8 @@ unsafe fn run(mut app: App, title: &CStr) {
     app.world.insert_resource(Assets::<Mesh>::default());
     app.world.insert_resource(Assets::<Material>::default());
     app.world.insert_resource(Input::default());
-    app.world.insert_resource(Camera {
-        x: 0.0,
-        y: 0.0,
-        half_height: 1.0,
-    });
+    app.world.insert_resource(Camera::default());
+    app.world.insert_resource(PostProcess::default());
 
     let w = platform::open(WIDTH, HEIGHT, title);
     let vkapp = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
@@ -719,7 +905,7 @@ unsafe fn run(mut app: App, title: &CStr) {
     // graphics: the camera view is the only push constant
     let push = [vk::PushConstantRange::default()
         .stage_flags(vk::ShaderStageFlags::VERTEX)
-        .size(size_of::<[f32; 4]>() as u32)];
+        .size(size_of::<[f32; 16]>() as u32)];
     let layout: vk::PipelineLayout = mk(CREATE_PIPELINE_LAYOUT_FAILED, |p| {
         vkCreatePipelineLayout(
             device,
@@ -781,14 +967,22 @@ unsafe fn run(mut app: App, title: &CStr) {
     );
     vkDestroyShaderModule(device, cull_module, NA);
 
-    let pool_sizes = [vk::DescriptorPoolSize::default()
-        .ty(vk::DescriptorType::STORAGE_BUFFER)
-        .descriptor_count(3 * FRAMES as u32)];
+    let pool_sizes = [
+        vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(3 * FRAMES as u32),
+        vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(1),
+        vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::SAMPLER)
+            .descriptor_count(1),
+    ];
     let dpool: vk::DescriptorPool = mk(CREATE_DESCRIPTOR_POOL_FAILED, |p| {
         vkCreateDescriptorPool(
             device,
             &vk::DescriptorPoolCreateInfo::default()
-                .max_sets(FRAMES as u32)
+                .max_sets(FRAMES as u32 + 1)
                 .pool_sizes(&pool_sizes),
             NA,
             p,
@@ -843,6 +1037,67 @@ unsafe fn run(mut app: App, title: &CStr) {
         }
     });
 
+    // post processing: the scene color is sampled by a fullscreen pass into the swapchain
+    let post_binds = [
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::SAMPLER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+    ];
+    let post_set_layout: vk::DescriptorSetLayout = mk(CREATE_DESCRIPTOR_SET_LAYOUT_FAILED, |p| {
+        vkCreateDescriptorSetLayout(
+            device,
+            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&post_binds),
+            NA,
+            p,
+        )
+    });
+    let post_set_layouts = [post_set_layout];
+    let post_push = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::FRAGMENT)
+        .size(size_of::<[f32; 4]>() as u32)];
+    let post_layout: vk::PipelineLayout = mk(CREATE_PIPELINE_LAYOUT_FAILED, |p| {
+        vkCreatePipelineLayout(
+            device,
+            &vk::PipelineLayoutCreateInfo::default()
+                .set_layouts(&post_set_layouts)
+                .push_constant_ranges(&post_push),
+            NA,
+            p,
+        )
+    });
+    let sampler: vk::Sampler = mk(CREATE_SAMPLER_FAILED, |p| {
+        vkCreateSampler(
+            device,
+            &vk::SamplerCreateInfo::default()
+                .mag_filter(vk::Filter::LINEAR)
+                .min_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+            NA,
+            p,
+        )
+    });
+    let mut post_set = vk::DescriptorSet::default();
+    ck(
+        vkAllocateDescriptorSets(
+            device,
+            &vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(dpool)
+                .set_layouts(&post_set_layouts),
+            &mut post_set,
+        ),
+        ALLOCATE_DESCRIPTOR_SETS_FAILED,
+    );
+    write_post_set(&ctx, post_set, sampler, sc.scene.view);
+
     let pool: vk::CommandPool = mk(CREATE_COMMAND_POOL_FAILED, |p| {
         vkCreateCommandPool(
             device,
@@ -888,6 +1143,10 @@ unsafe fn run(mut app: App, title: &CStr) {
     let (mut gpu_meshes, mut pipes): (Vec<Option<GpuMesh>>, Vec<Option<vk::Pipeline>>) =
         (Vec::new(), Vec::new());
     let mut last = platform::now();
+    let start = last;
+    let center = |e: vk::Extent2D| [(e.width / 2) as i32, (e.height / 2) as i32];
+    state.mouse = center(sc.extent);
+    let mut post_pipe: Option<(&'static Align4<[u8]>, vk::Pipeline)> = None;
 
     loop {
         if !platform::poll(&w, &mut resized, &mut state) {
@@ -896,16 +1155,16 @@ unsafe fn run(mut app: App, title: &CStr) {
         let now = platform::now();
         let dt = (now - last) as f32;
         last = now;
-        let cam = *app.world.resource::<Camera>().unwrap();
-        let (ew, eh) = (sc.extent.width as f32, sc.extent.height as f32);
+        // Mouse look: the cursor's offset from the window center is this frame's motion; then put it back.
+        let c = center(sc.extent);
+        let delta = [state.mouse[0] - c[0], state.mouse[1] - c[1]];
+        if delta != [0, 0] {
+            platform::warp_cursor(&w, c[0], c[1]);
+            state.mouse = c;
+        }
         let input = app.world.resource_mut::<Input>().unwrap();
         (input.prev, input.now) = (input.now, state.keys);
-        (input.prev_mouse, input.mouse) = (input.mouse, state.mouse);
-        // window pixels (y down) -> world units (y up)
-        input.mouse_world = [
-            cam.x + (2.0 * state.mouse[0] as f32 / ew - 1.0) * cam.half_height * ew / eh,
-            cam.y + (1.0 - 2.0 * state.mouse[1] as f32 / eh) * cam.half_height,
-        ];
+        input.delta = [delta[0] as f32, delta[1] as f32];
         app.run_frame(dt);
 
         ck(
@@ -918,6 +1177,8 @@ unsafe fn run(mut app: App, title: &CStr) {
             let new = make_swapchain(&ctx, sc.handle);
             destroy_swapchain(&ctx, &sc);
             sc = new;
+            write_post_set(&ctx, post_set, sampler, sc.scene.view);
+            state.mouse = center(sc.extent);
             resized = false;
         }
 
@@ -963,8 +1224,8 @@ unsafe fn run(mut app: App, title: &CStr) {
         let meshes = world.resource::<Assets<Mesh>>().unwrap();
         let mats = world.resource::<Assets<Material>>().unwrap();
         let cam = *world.resource::<Camera>().unwrap();
-        let half_w = cam.half_height * sc.extent.width as f32 / sc.extent.height as f32;
-        let view = [cam.x, cam.y, half_w, cam.half_height];
+        let (ew, eh) = (sc.extent.width as f32, sc.extent.height as f32);
+        let vp = view_proj(&cam, ew / eh);
 
         let mut groups: Vec<(usize, usize)> = Vec::new(); // (mesh, material) per group
         let mut counts = [0usize; GROUPS];
@@ -987,9 +1248,9 @@ unsafe fn run(mut app: App, title: &CStr) {
             let t = world.get::<Transform>(e).unwrap();
             let c = world.get::<Color>(e).map_or([1.0; 3], |c| c.0);
             fr.input.ptr.cast::<Inst>().add(n).write(Inst {
-                a: [t.x, t.y, t.scale, t.rot],
-                color: [c[0], c[1], c[2], 1.0],
-                meta: [g as f32, meshes.0[mi].radius2, 0.0, 0.0],
+                a: [t.pos[0], t.pos[1], t.pos[2], t.yaw],
+                s: [t.scale[0], t.scale[1], t.scale[2], g as f32],
+                color: [c[0], c[1], c[2], meshes.0[mi].radius2],
             });
             n += 1;
         }
@@ -1015,7 +1276,7 @@ unsafe fn run(mut app: App, title: &CStr) {
                 ptr::null(),
             );
             let pc = CullPc {
-                view,
+                vp,
                 count: n as u32,
                 _pad: [0; 3],
             };
@@ -1047,9 +1308,130 @@ unsafe fn run(mut app: App, title: &CStr) {
             );
         }
 
+        // ---- scene pass: offscreen color + depth
+        let area = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: sc.extent,
+        };
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: ew,
+            height: eh,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        transition(
+            cmd,
+            sc.scene.image,
+            vk::ImageAspectFlags::COLOR,
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ),
+            // waits for the previous frame's post pass to finish reading this image
+            (
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            ),
+            (
+                vk::AccessFlags::empty(),
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ),
+        );
+        transition(
+            cmd,
+            sc.depth.image,
+            vk::ImageAspectFlags::DEPTH,
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+            ),
+            (
+                vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            ),
+            (
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+        );
+        let color = [vk::RenderingAttachmentInfo::default()
+            .image_view(sc.scene.view)
+            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::STORE)
+            .clear_value(vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [cam.sky[0], cam.sky[1], cam.sky[2], 1.0],
+                },
+            })];
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(sc.depth.view)
+            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .store_op(vk::AttachmentStoreOp::DONT_CARE)
+            .clear_value(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: 1.0,
+                    stencil: 0,
+                },
+            });
+        vkCmdBeginRendering(
+            cmd,
+            &vk::RenderingInfo::default()
+                .render_area(area)
+                .layer_count(1)
+                .color_attachments(&color)
+                .depth_attachment(&depth),
+        );
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        vkCmdSetScissor(cmd, 0, 1, &area);
+        for (g, &(mi, ma)) in groups.iter().enumerate() {
+            // one pipeline bind per group; fine while groups are few.
+            let pipe = *slot(&mut pipes, ma, || {
+                make_pipeline(&ctx, layout, SCENE_FORMAT, &mats.0[ma])
+            });
+            let m = gpu_meshes[mi].as_ref().unwrap();
+            vkCmdBindPipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
+            vkCmdPushConstants(
+                cmd,
+                layout,
+                vk::ShaderStageFlags::VERTEX,
+                0,
+                size_of::<[f32; 16]>() as u32,
+                vp.as_ptr().cast(),
+            );
+            let bufs = [m.buf, fr.visible.buf];
+            let offs = [0, (g * CAP * size_of::<Inst>()) as u64];
+            vkCmdBindVertexBuffers(cmd, 0, 2, bufs.as_ptr(), offs.as_ptr());
+            vkCmdDrawIndirect(cmd, fr.draws.buf, (g * size_of::<[u32; 4]>()) as u64, 1, 16);
+        }
+        vkCmdEndRendering(cmd);
+        transition(
+            cmd,
+            sc.scene.image,
+            vk::ImageAspectFlags::COLOR,
+            (
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ),
+            (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+            ),
+            (
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                vk::AccessFlags::SHADER_READ,
+            ),
+        );
+
+        // ---- post pass: scene -> swapchain
         transition(
             cmd,
             sc.images[idx],
+            vk::ImageAspectFlags::COLOR,
             (
                 vk::ImageLayout::UNDEFINED,
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
@@ -1063,67 +1445,56 @@ unsafe fn run(mut app: App, title: &CStr) {
                 vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
             ),
         );
-
-        let attachments = [vk::RenderingAttachmentInfo::default()
+        let target = [vk::RenderingAttachmentInfo::default()
             .image_view(sc.views[idx])
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.05, 0.05, 0.08, 1.0],
-                },
-            })];
-        let area = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: sc.extent,
-        };
+            .load_op(vk::AttachmentLoadOp::DONT_CARE) // the fullscreen triangle covers everything
+            .store_op(vk::AttachmentStoreOp::STORE)];
         vkCmdBeginRendering(
             cmd,
             &vk::RenderingInfo::default()
                 .render_area(area)
                 .layer_count(1)
-                .color_attachments(&attachments),
+                .color_attachments(&target),
         );
-        vkCmdSetViewport(
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        vkCmdSetScissor(cmd, 0, 1, &area);
+        let shader = world.resource::<PostProcess>().unwrap().0.unwrap_or(POST);
+        // swapping the shader at runtime leaks the old pipeline.
+        let post = match post_pipe {
+            Some((s, p)) if ptr::eq(s, shader) => p,
+            _ => {
+                let p = make_post_pipeline(&ctx, post_layout, sc.format, shader);
+                post_pipe = Some((shader, p));
+                p
+            }
+        };
+        vkCmdBindPipeline(cmd, vk::PipelineBindPoint::GRAPHICS, post);
+        vkCmdBindDescriptorSets(
             cmd,
+            vk::PipelineBindPoint::GRAPHICS,
+            post_layout,
             0,
             1,
-            &vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: sc.extent.width as f32,
-                height: sc.extent.height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            },
+            &post_set,
+            0,
+            ptr::null(),
         );
-        vkCmdSetScissor(cmd, 0, 1, &area);
-        for (g, &(mi, ma)) in groups.iter().enumerate() {
-            // one pipeline bind per group; fine while groups are few.
-            let pipe = *slot(&mut pipes, ma, || {
-                make_pipeline(&ctx, layout, sc.format, &mats.0[ma])
-            });
-            let m = gpu_meshes[mi].as_ref().unwrap();
-            vkCmdBindPipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
-            vkCmdPushConstants(
-                cmd,
-                layout,
-                vk::ShaderStageFlags::VERTEX,
-                0,
-                size_of::<[f32; 4]>() as u32,
-                view.as_ptr().cast(),
-            );
-            let bufs = [m.buf, fr.visible.buf];
-            let offs = [0, (g * CAP * size_of::<Inst>()) as u64];
-            vkCmdBindVertexBuffers(cmd, 0, 2, bufs.as_ptr(), offs.as_ptr());
-            vkCmdDrawIndirect(cmd, fr.draws.buf, (g * size_of::<[u32; 4]>()) as u64, 1, 16);
-        }
+        let params = [ew, eh, (now - start) as f32, 0.0];
+        vkCmdPushConstants(
+            cmd,
+            post_layout,
+            vk::ShaderStageFlags::FRAGMENT,
+            0,
+            size_of::<[f32; 4]>() as u32,
+            params.as_ptr().cast(),
+        );
+        vkCmdDraw(cmd, 3, 1, 0, 0);
         vkCmdEndRendering(cmd);
-
         transition(
             cmd,
             sc.images[idx],
+            vk::ImageAspectFlags::COLOR,
             (
                 vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::PRESENT_SRC_KHR,

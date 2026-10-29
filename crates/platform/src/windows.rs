@@ -103,6 +103,13 @@ pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
 }
 
 /// Windows start hidden (an unpainted window during Vulkan init looks like a white hang); call once the first frame is queued.
+/// Move the cursor to a window pixel (used to turn the mouse into endless relative motion).
+pub unsafe fn warp_cursor(w: &Window, x: i32, y: i32) {
+    let mut p = [x, y];
+    ClientToScreen(w.hwnd, &mut p);
+    SetCursorPos(p[0], p[1]);
+}
+
 pub unsafe fn show(w: &Window) {
     ShowWindow(w.hwnd, SW_SHOW);
 }

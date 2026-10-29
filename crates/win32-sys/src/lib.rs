@@ -57,6 +57,8 @@ unsafe extern "system" {
 
 #[link(name = "user32", kind = "raw-dylib")]
 unsafe extern "system" {
+    pub fn ClientToScreen(h: isize, p: *mut [i32; 2]) -> i32;
+    pub fn SetCursorPos(x: i32, y: i32) -> i32;
     pub fn RegisterClassA(c: *const WndClass) -> u16;
     pub fn CreateWindowExA(
         ex_style: u32,

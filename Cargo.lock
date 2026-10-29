@@ -79,7 +79,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
-name = "error-codes"
+name = "errors"
 version = "0.1.0"
 
 [[package]]
@@ -94,7 +94,7 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "ecs",
- "error-codes",
+ "errors",
  "platform",
  "shader",
  "vulkan-sys",
@@ -208,7 +208,7 @@ name = "platform"
 version = "0.1.0"
 dependencies = [
  "ash",
- "error-codes",
+ "errors",
  "libc",
  "vulkan-sys",
  "win32-sys",

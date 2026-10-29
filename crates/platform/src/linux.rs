@@ -117,6 +117,12 @@ pub unsafe fn open(width: u16, height: u16, title: &CStr) -> Window {
 }
 
 /// Windows start unmapped (an unpainted window during Vulkan init looks like a hang); call once the first frame is queued.
+/// Move the cursor to a window pixel (used to turn the mouse into endless relative motion).
+pub unsafe fn warp_cursor(w: &Window, x: i32, y: i32) {
+    xcb_warp_pointer(w.conn, 0, w.win, 0, 0, 0, 0, x as i16, y as i16);
+    xcb_flush(w.conn);
+}
+
 pub unsafe fn show(w: &Window) {
     xcb_map_window(w.conn, w.win);
     xcb_flush(w.conn);

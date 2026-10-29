@@ -102,6 +102,17 @@ unsafe extern "C" {
         err: *mut *mut c_void,
     ) -> *mut AtomReply;
     pub fn xcb_map_window(c: *mut Conn, window: u32) -> Cookie;
+    pub fn xcb_warp_pointer(
+        c: *mut Conn,
+        src_window: u32,
+        dst_window: u32,
+        src_x: i16,
+        src_y: i16,
+        src_w: u16,
+        src_h: u16,
+        dst_x: i16,
+        dst_y: i16,
+    ) -> Cookie;
     pub fn xcb_flush(c: *mut Conn) -> c_int;
     pub fn xcb_poll_for_event(c: *mut Conn) -> *mut Event;
 }
