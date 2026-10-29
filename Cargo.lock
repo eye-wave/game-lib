@@ -90,6 +90,7 @@ dependencies = [
  "gfx",
  "platform",
  "shader",
+ "win32-sys",
 ]
 
 [[package]]
@@ -101,7 +102,7 @@ dependencies = [
  "math",
  "platform",
  "shader",
- "winresource",
+ "win32-sys",
 ]
 
 [[package]]
@@ -420,6 +421,9 @@ dependencies = [
 [[package]]
 name = "win32-sys"
 version = "0.1.0"
+dependencies = [
+ "winresource",
+]
 
 [[package]]
 name = "winnow"

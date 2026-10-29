@@ -161,8 +161,8 @@ impl Default for Camera {
 #[derive(Clone, Copy, Default)]
 pub struct PostProcess(pub Option<&'static Align4<[u8]>>);
 
-/// Resource: whether the mouse is captured (default true). Insert `MouseCapture(false)` before `app.run(..)` to keep
-/// the normal pointer, e.g. in 2D apps that don't use `mouse_delta`. Changing it while running is not supported.
+/// Resource: whether the mouse is captured (default false). Insert `MouseCapture(true)` before `app.run(..)` to get
+/// FPS-style `mouse_delta` (hidden, confined, recentered pointer). Changing it while running is not supported.
 #[derive(Clone, Copy)]
 pub struct MouseCapture(pub bool);
 
@@ -835,7 +835,7 @@ unsafe fn run(mut app: App, title: &CStr) {
     app.world.insert_resource(Assets::<Material>::default());
     app.world.insert_resource(Input::default());
     if app.world.resource::<MouseCapture>().is_none() {
-        app.world.insert_resource(MouseCapture(true));
+        app.world.insert_resource(MouseCapture(false));
     }
     app.world.insert_resource(Camera::default());
     app.world.insert_resource(PostProcess::default());

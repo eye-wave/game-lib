@@ -16,9 +16,16 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             bin: stupid-game.exe
+
     runs-on: ${{ matrix.os }}
+
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install Just
+        uses: taiki-e/install-action@v2
+        with:
+          tool: just
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -31,20 +38,19 @@ jobs:
 
       - name: Linux tools
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y spirv-tools libvulkan1 libxcb1
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y spirv-tools libvulkan1 libxcb1
 
-      - name: sstrip
+      - name: Build sstrip
         if: runner.os == 'Linux'
         run: |
           git clone --depth 1 https://github.com/BR903/ELFkickers
           make -C ELFkickers
           sudo install -m755 "$(find ELFkickers -name sstrip -type f -perm -u+x | head -1)" /usr/local/bin/sstrip
 
-      - name: Windows tools
-        if: runner.os == 'Windows'
-        run: choco install make -y
-
-      - run: make build
+      - name: Build
+        run: just build stupid-game
 
       - uses: actions/upload-artifact@v4
         with:

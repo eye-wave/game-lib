@@ -7,7 +7,10 @@ use core::f32::consts::FRAC_1_SQRT_2;
 
 use alloc::vec::Vec;
 use ecs::{App, Schedule::*, World};
-use gfx::{Assets, Camera, Color, Input, Material, Mesh, PostProcess, RunExt, Transform, Vertex};
+use gfx::{
+    Assets, Camera, Color, Input, Material, Mesh, MouseCapture, PostProcess, RunExt, Transform,
+    Vertex,
+};
 use math::FloatExt;
 use platform::input::{KeyA, KeyD, KeyS, KeyW, Space};
 use shader::{Align4, include_shader};
@@ -293,6 +296,7 @@ fn game() {
         .add_system(Update, walk)
         .add_system(Update, collide)
         .add_system(Update, follow);
+    app.world.insert_resource(MouseCapture(true));
     app.run(c"3D walk: WASD + mouse, Esc quits");
 }
 

@@ -6,7 +6,7 @@ extern crate alloc;
 use core::f32::consts::{FRAC_1_SQRT_2, TAU};
 
 use ecs::{App, Schedule::*, World};
-use gfx::{Assets, Camera, Color, Input, Material, Mesh, MouseCapture, RunExt, Transform};
+use gfx::{Assets, Camera, Color, Input, Material, Mesh, RunExt, Transform};
 use platform::input::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp, KeyA, KeyD, KeyS, KeyW};
 use shader::{Align4, include_shader};
 
@@ -121,7 +121,6 @@ fn game() {
     app.add_system(Startup, setup)
         .add_system(Update, steer)
         .add_system(Update, spin);
-    app.world.insert_resource(MouseCapture(false)); // leave the pointer alone
     app.run(c"2D walk: WASD or arrows, Esc quits");
 }
 

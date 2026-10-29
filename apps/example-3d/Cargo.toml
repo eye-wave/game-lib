@@ -13,6 +13,4 @@ shader = { path = "../../crates/shader" }
 
 [build-dependencies]
 shader = { path = "../../crates/shader", features = ["build"] }
-
-[target.'cfg(target_os = "windows")'.build-dependencies]
-winresource = "0.1"
+win32-sys = { path = "../../crates/win32-sys", features = ["build"] }
