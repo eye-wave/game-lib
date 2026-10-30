@@ -18,7 +18,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Just
         uses: taiki-e/install-action@v2
@@ -62,7 +62,7 @@ jobs:
         run: |
           Compress-Archive -Path target/bundle/* -DestinationPath target/bundle-${{ matrix.target }}.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: bundle-${{ matrix.target }}
           path: target/bundle-${{ matrix.target }}.zip
