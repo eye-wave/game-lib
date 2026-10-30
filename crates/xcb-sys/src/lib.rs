@@ -34,6 +34,14 @@ pub struct Event {
     pub detail: u8,
     pub sequence: u16,
 }
+/// KeyPress / KeyRelease; `detail` is the keycode.
+#[repr(C)]
+pub struct KeyEvent {
+    pub response_type: u8,
+    pub detail: u8,
+    pub sequence: u16,
+    pub time: u32,
+}
 /// Generic X extension descriptor; libxcb fills in `global_id`.
 #[repr(C)]
 pub struct Extension {

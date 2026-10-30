@@ -5,7 +5,7 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::{boxed::Box, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 use core::any::TypeId;
 use core::marker::PhantomData;
 use core::{mem, ptr};
@@ -533,93 +533,112 @@ impl World {
 
 /// A system is any closure over the world plus a delta time in seconds.
 /// dt is 0 for startup, the fixed step for fixed systems, the frame time for update systems.
-type System = Box<dyn FnMut(&mut World, f32)>;
+type System = fn(&mut World, f32);
 
 const MAX_CATCHUP: u32 = 8; // fixed steps per frame, so a long stall can't spiral
 
-/// Owns the World and three schedules. Systems run in the order they were added.
-///   startup: once, before the first frame    fixed: 0..n times per frame at `tick_hz`    update: once per frame
+#[repr(usize)]
+#[derive(Clone, Copy)]
+pub enum Schedule {
+    Startup,
+    PreFixed,
+    Fixed,
+    Update,
+}
+
+const SCHEDULE_COUNT: usize = Schedule::Update as usize + 1;
+
+/// Owns the World and its schedules. Systems run in the order they were added.
+///   startup: once, before the first frame    update: once per frame
+///   fixed: 0..n times per frame at the tick rate, and only if at least one fixed system exists
+///   pre_fixed: right before every fixed step (e.g. to hand the step its buffered input)
 pub struct App {
     pub world: World,
-    startup: Vec<System>,
-    fixed: Vec<System>,
-    update: Vec<System>,
+    schedules: [Vec<System>; SCHEDULE_COUNT],
     step: f32, // seconds per fixed tick
     acc: f32,
     started: bool,
 }
 
-pub enum Schedule {
-    Startup,
-    Update,
-    Fixed,
-}
-
 impl App {
-    pub fn new(tick_hz: f32) -> Self {
-        let mut app = App {
+    pub fn new() -> Self {
+        Self {
             world: World::default(),
-            startup: vec![],
-            fixed: vec![],
-            update: vec![],
-            step: 0.0,
+            schedules: core::array::from_fn(|_| Vec::new()),
+            step: 1.0 / 240.0,
             acc: 0.0,
             started: false,
-        };
-        app.set_tick_rate(tick_hz);
-        app
+        }
     }
 
     /// Change the fixed tick rate at any time; leftover accumulated time carries over.
-    pub fn set_tick_rate(&mut self, hz: f32) {
+    pub fn set_tick_rate(&mut self, hz: f32) -> &mut Self {
         assert!(hz > 0.0, "tick rate must be positive");
         self.step = 1.0 / hz;
-    }
-
-    pub fn add_system(
-        &mut self,
-        schedule: Schedule,
-        f: impl FnMut(&mut World, f32) + 'static,
-    ) -> &mut Self {
-        match schedule {
-            Schedule::Startup => self.startup.push(Box::new(f)),
-            Schedule::Update => self.update.push(Box::new(f)),
-            Schedule::Fixed => self.fixed.push(Box::new(f)),
-        }
-
         self
     }
 
-    /// Advance one frame of `dt` seconds. You own the loop (and the clock); call this from it.
-    /// no built-in real-time loop; wrap this in `Instant`/sleep when you need one.
+    pub fn add_system(&mut self, schedule: Schedule, f: System) -> &mut Self {
+        self.schedules[schedule as usize].push(f);
+        self
+    }
+
+    /// Run one schedule in insertion order. Naming the two fields here is what lets them borrow separately.
+    fn run(&mut self, schedule: Schedule, dt: f32) {
+        for s in &mut self.schedules[schedule as usize] {
+            s(&mut self.world, dt);
+        }
+    }
+
     pub fn run_frame(&mut self, dt: f32) {
         if !self.started {
             self.started = true;
-            for s in &mut self.startup {
-                s(&mut self.world, 0.0);
+            self.run(Schedule::Startup, 0.0);
+        }
+        if !self.schedules[Schedule::Fixed as usize].is_empty() {
+            self.acc += dt;
+            let (step, mut n) = (self.step, 0);
+            while self.acc >= step && n < MAX_CATCHUP {
+                self.run(Schedule::PreFixed, step);
+                self.run(Schedule::Fixed, step);
+                self.acc -= step;
+                n += 1;
+            }
+            if self.acc >= step {
+                self.acc = 0.0; // hit the cap: drop the backlog instead of chasing it
             }
         }
-        self.acc += dt;
-        let mut n = 0;
-        while self.acc >= self.step && n < MAX_CATCHUP {
-            for s in &mut self.fixed {
-                s(&mut self.world, self.step);
-            }
-            self.acc -= self.step;
-            n += 1;
-        }
-        if self.acc >= self.step {
-            self.acc = 0.0; // hit the cap: drop the backlog instead of chasing it
-        }
-        for s in &mut self.update {
-            s(&mut self.world, dt);
-        }
+        self.run(Schedule::Update, dt);
+    }
+}
+
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fixed_loop_needs_a_fixed_system() {
+        let mut app = App::new();
+        app.set_tick_rate(10.0);
+        app.world.insert_resource(0u32);
+        app.add_system(Schedule::PreFixed, |w, _| {
+            *w.resource_mut::<u32>().unwrap() += 100
+        });
+        app.run_frame(1.0);
+        assert_eq!(*app.world.resource::<u32>().unwrap(), 0); // pre_fixed alone never runs
+        assert_eq!(app.acc, 0.0); // and no time piled up for a fixed system added later
+        app.add_system(Schedule::Fixed, |w, _| {
+            *w.resource_mut::<u32>().unwrap() += 1
+        });
+        app.run_frame(0.35);
+        assert_eq!(*app.world.resource::<u32>().unwrap(), 3 * 101); // 3 steps, each pre_fixed then fixed
+    }
 
     #[test]
     fn insert_query_compact_despawn() {

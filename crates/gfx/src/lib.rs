@@ -1,6 +1,6 @@
 //! Window, Vulkan and the 3D render loop, behind a Bevy-ish API.
 //!
-//! Game code only touches `Mesh`, `Material`, `Transform`, `Color`, `Camera2d`, `Camera3d`, `Handle`, `Assets`, `Input` and `app.run(..)`.
+//! Game code only touches `Mesh`, `Material`, `Transform`, `Color`, `Camera2d`, `Camera3d`, `Handle`, `Assets`, `Input`, `FixedInput` and `app.run(..)`.
 //! Rendering is instanced and GPU-culled: every frame all drawable entities go into one instance buffer, a compute
 //! shader (`cull.wgsl`) keeps the ones inside the camera frustum, and one indirect draw per (mesh, material) pair draws
 //! them into an offscreen target (with depth). A fullscreen post-process pass (`PostProcess`) then writes the swapchain.
@@ -15,12 +15,16 @@ pub use ash::vk;
 use core::{
     ffi::{CStr, c_void},
     marker::PhantomData,
+    ops::Deref,
     ptr, slice,
 };
-use ecs::App;
+use ecs::{App, Schedule};
 use errors::prelude::*;
 use math::{FloatExt, Vec2, Vec3};
-use platform::{die, input::Keys};
+use platform::{
+    die,
+    input::{Keys, MAX_KEYS, Pending, View as PlatformView},
+};
 use shader::{Align4, words};
 use vulkan_sys::*;
 
@@ -218,36 +222,68 @@ pub struct PostProcess(pub Option<&'static Align4<[u8]>>);
 #[derive(Clone, Copy)]
 pub struct MouseCapture(pub bool);
 
-/// Resource: keyboard and mouse. Keys are `platform::input::*` ids (`KeyW`, `ArrowLeft`, `Space`, ...).
+/// Resource: keyboard and mouse for `Update` systems, refreshed once per frame. Keys are `platform::input::*` ids
+/// (`KeyW`, `ArrowLeft`, `Space`, ...): `is_holding`, `just_pressed`, `just_released`, `axis`. A tap that starts and
+/// ends inside one frame is not lost: it is both `just_pressed` and `just_released`.
+/// Fixed systems should read `FixedInput` instead: this one only changes once per frame, so a fixed step could see
+/// the same press several times, or none.
 /// The mouse is captured (hidden, confined, recentered) while the window has focus, so it only reports motion
 /// (`mouse_delta`), like an FPS.
 #[derive(Clone, Copy, Default)]
 pub struct Input {
-    now: Keys,
-    prev: Keys, // state at the previous frame
+    view: PlatformView,
     delta: [f32; 2],
 }
+impl Deref for Input {
+    type Target = PlatformView;
+    fn deref(&self) -> &PlatformView {
+        &self.view
+    }
+}
 impl Input {
-    pub fn is_holding(&self, key: u8) -> bool {
-        self.now.get(key)
-    }
-    /// True only on the frame the key went down (a tap shorter than one frame is missed).
-    pub fn just_pressed(&self, key: u8) -> bool {
-        self.now.get(key) && !self.prev.get(key)
-    }
-    /// +1 while any of `plus` is held, -1 while any of `minus` is, 0 for both or neither.
-    pub fn axis(&self, plus: &[u8], minus: &[u8]) -> f32 {
-        let any = |ks: &[u8]| ks.iter().any(|&k| self.is_holding(k));
-        any(plus) as i8 as f32 - any(minus) as i8 as f32
-    }
     /// Mouse motion since the last frame (x right, y down): raw device units on Linux with XInput2, else pixels.
     pub fn mouse_delta(&self) -> [f32; 2] {
         self.delta
     }
 }
 
+/// Resource: keyboard and mouse for `Fixed` systems, same methods as `Input`, advanced once per fixed step.
+/// Input is still sampled every frame; the changes wait here until a step takes them. So a physics step never
+/// misses a tap, never sees a press twice, and input stays as precise as the frame rate even at a slow tick.
+/// A step takes at most one up/down change per key (a tap shows as held for one step, then released), and
+/// `mouse_delta` is all motion since the previous step. Runs only if you added a `Fixed` system.
+#[derive(Clone, Copy, Default)]
+pub struct FixedInput {
+    view: PlatformView,
+    delta: [f32; 2],
+    pending: Pending,
+    pending_delta: [f32; 2],
+}
+impl Deref for FixedInput {
+    type Target = PlatformView;
+    fn deref(&self) -> &PlatformView {
+        &self.view
+    }
+}
+impl FixedInput {
+    pub fn mouse_delta(&self) -> [f32; 2] {
+        self.delta
+    }
+    fn feed(&mut self, changes: &[u8; MAX_KEYS], delta: [f32; 2]) {
+        self.pending.add(changes);
+        self.pending_delta = [
+            self.pending_delta[0] + delta[0],
+            self.pending_delta[1] + delta[1],
+        ];
+    }
+    fn step(&mut self) {
+        self.pending.step(&mut self.view);
+        self.delta = core::mem::take(&mut self.pending_delta);
+    }
+}
+
 /// `app.run(title)`: open a window and drive the app until it closes.
-/// Adds the `Assets<Mesh>`, `Assets<Material>` and `Input` resources first, so startup systems can use them.
+/// Adds the `Assets<Mesh>`, `Assets<Material>`, `Input` and `FixedInput` resources first, so startup systems can use them.
 pub trait RunExt {
     fn run(self, title: &CStr);
 }
@@ -926,6 +962,10 @@ unsafe fn run(mut app: App, title: &CStr) {
     app.world.insert_resource(Assets::<Mesh>::default());
     app.world.insert_resource(Assets::<Material>::default());
     app.world.insert_resource(Input::default());
+    app.world.insert_resource(FixedInput::default());
+    app.add_system(Schedule::PreFixed, |w, _| {
+        w.resource_mut::<FixedInput>().unwrap().step()
+    });
     if app.world.resource::<MouseCapture>().is_none() {
         app.world.insert_resource(MouseCapture(false));
     }
@@ -1261,9 +1301,15 @@ unsafe fn run(mut app: App, title: &CStr) {
         } else {
             [0.0; 2]
         };
-        let input = app.world.resource_mut::<Input>().unwrap();
-        (input.prev, input.now) = (input.now, keys);
-        input.delta = delta;
+        let changes = keys.take_changes();
+        *app.world.resource_mut::<Input>().unwrap() = Input {
+            view: PlatformView::frame(keys.held(), &changes),
+            delta,
+        };
+        app.world
+            .resource_mut::<FixedInput>()
+            .unwrap()
+            .feed(&changes, delta);
         app.run_frame(dt);
 
         ck(

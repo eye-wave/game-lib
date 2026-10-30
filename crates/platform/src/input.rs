@@ -38,7 +38,9 @@ keys! {
     NumpadDivide 106 0x6F, NumpadEnter 104 0,
 }
 
-const _: () = assert!(NATIVE.len() <= 128); // `Keys` holds 128 bits
+/// Key ids are below this.
+pub const MAX_KEYS: usize = 128;
+const _: () = assert!(NATIVE.len() <= MAX_KEYS); // `Bits` holds 128 bits
 
 fn find(n: u8, col: impl Fn(&(u8, u8)) -> u8) -> Option<u8> {
     NATIVE
@@ -57,14 +59,14 @@ pub fn from_windows(vk: u8) -> Option<u8> {
     find(vk, |k| k.1)
 }
 
-/// Which keys are held. `poll` keeps one up to date.
+/// A set of key ids.
 #[derive(Clone, Copy, Default)]
-pub struct Keys([u64; 2]);
+pub struct Bits([u64; 2]);
 
-impl Keys {
-    pub fn set(&mut self, key: u8, down: bool) {
+impl Bits {
+    pub fn set(&mut self, key: u8, on: bool) {
         let (w, b) = (key as usize / 64, key % 64);
-        if down {
+        if on {
             self.0[w] |= 1 << b;
         } else {
             self.0[w] &= !(1 << b);
@@ -73,5 +75,187 @@ impl Keys {
 
     pub fn get(&self, key: u8) -> bool {
         self.0[key as usize / 64] >> (key % 64) & 1 != 0
+    }
+}
+
+/// Raw keyboard state, kept up to date by `poll`: which keys are held, and how many times each key changed state
+/// since `take_changes`. The counts are what make a tap shorter than a frame visible.
+#[derive(Clone, Copy)]
+pub struct Keys {
+    held: Bits,
+    changes: [u8; MAX_KEYS],
+}
+
+impl Default for Keys {
+    fn default() -> Self {
+        Keys {
+            held: Bits::default(),
+            changes: [0; MAX_KEYS],
+        }
+    }
+}
+
+impl Keys {
+    pub fn set(&mut self, key: u8, down: bool) {
+        if self.held.get(key) != down {
+            self.held.set(key, down);
+            let c = &mut self.changes[key as usize];
+            *c = c.saturating_add(1);
+        }
+    }
+
+    pub fn get(&self, key: u8) -> bool {
+        self.held.get(key)
+    }
+
+    pub fn held(&self) -> Bits {
+        self.held
+    }
+
+    /// How many times each key went up or down since the last call (a tap inside one frame is 2); resets the counts.
+    pub fn take_changes(&mut self) -> [u8; MAX_KEYS] {
+        core::mem::replace(&mut self.changes, [0; MAX_KEYS])
+    }
+}
+
+/// What one reader sees: the held keys, and which keys went down / up since that reader last looked.
+/// A key can be both pressed and released (a tap, or a release and press again).
+#[derive(Clone, Copy, Default)]
+pub struct View {
+    held: Bits,
+    pressed: Bits,
+    released: Bits,
+}
+
+impl View {
+    /// A reader that looks once per frame: `held` is the state now, `changes` is `Keys::take_changes` for the frame.
+    pub fn frame(held: Bits, changes: &[u8; MAX_KEYS]) -> View {
+        let mut v = View {
+            held,
+            ..View::default()
+        };
+        for k in 0..MAX_KEYS as u8 {
+            let c = changes[k as usize];
+            if c != 0 {
+                let before = held.get(k) ^ (c & 1 == 1); // an odd count means the state flipped over the frame
+                v.pressed.set(k, !before || c >= 2);
+                v.released.set(k, before || c >= 2);
+            }
+        }
+        v
+    }
+
+    pub fn is_holding(&self, key: u8) -> bool {
+        self.held.get(key)
+    }
+    pub fn just_pressed(&self, key: u8) -> bool {
+        self.pressed.get(key)
+    }
+    pub fn just_released(&self, key: u8) -> bool {
+        self.released.get(key)
+    }
+    /// +1 while any of `plus` is held, -1 while any of `minus` is, 0 for both or neither.
+    pub fn axis(&self, plus: &[u8], minus: &[u8]) -> f32 {
+        let any = |ks: &[u8]| ks.iter().any(|&k| self.is_holding(k));
+        any(plus) as i8 as f32 - any(minus) as i8 as f32
+    }
+}
+
+/// Key changes waiting for a reader that looks at its own pace (fixed steps). Each `step` takes at most one change
+/// per key, so nothing is lost when several happen between steps and nothing is seen twice when steps outnumber frames.
+#[derive(Clone, Copy)]
+pub struct Pending([u8; MAX_KEYS]);
+
+impl Default for Pending {
+    fn default() -> Self {
+        Pending([0; MAX_KEYS])
+    }
+}
+
+impl Pending {
+    pub fn add(&mut self, changes: &[u8; MAX_KEYS]) {
+        for (p, c) in self.0.iter_mut().zip(changes) {
+            *p = p.saturating_add(*c);
+        }
+    }
+
+    /// Move `view` forward one step.
+    pub fn step(&mut self, view: &mut View) {
+        (view.pressed, view.released) = (Bits::default(), Bits::default());
+        for k in 0..MAX_KEYS as u8 {
+            let p = &mut self.0[k as usize];
+            if *p != 0 {
+                *p -= 1;
+                let down = !view.held.get(k);
+                view.held.set(k, down);
+                if down {
+                    view.pressed.set(k, true);
+                } else {
+                    view.released.set(k, true);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tap(keys: &mut Keys, k: u8) {
+        keys.set(k, true);
+        keys.set(k, false);
+    }
+
+    #[test]
+    fn frame_view_sees_taps_shorter_than_a_frame() {
+        let mut keys = Keys::default();
+        tap(&mut keys, KeyA);
+        let v = View::frame(keys.held(), &keys.take_changes());
+        assert!(v.just_pressed(KeyA) && v.just_released(KeyA) && !v.is_holding(KeyA));
+        let v = View::frame(keys.held(), &keys.take_changes()); // next frame: nothing new
+        assert!(!v.just_pressed(KeyA) && !v.just_released(KeyA));
+    }
+
+    #[test]
+    fn frame_view_press_hold_release() {
+        let mut keys = Keys::default();
+        keys.set(KeyA, true);
+        let v = View::frame(keys.held(), &keys.take_changes());
+        assert!(v.just_pressed(KeyA) && v.is_holding(KeyA) && !v.just_released(KeyA));
+        let v = View::frame(keys.held(), &keys.take_changes()); // still held, no change
+        assert!(v.is_holding(KeyA) && !v.just_pressed(KeyA));
+        keys.set(KeyA, false);
+        let v = View::frame(keys.held(), &keys.take_changes());
+        assert!(v.just_released(KeyA) && !v.is_holding(KeyA) && !v.just_pressed(KeyA));
+    }
+
+    #[test]
+    fn fixed_steps_see_each_change_once() {
+        let (mut keys, mut pend, mut view) = (Keys::default(), Pending::default(), View::default());
+        keys.set(KeyA, true);
+        pend.add(&keys.take_changes());
+        pend.step(&mut view); // first step after the press
+        assert!(view.just_pressed(KeyA) && view.is_holding(KeyA));
+        pend.step(&mut view); // a second step in the same frame: no double press
+        assert!(!view.just_pressed(KeyA) && view.is_holding(KeyA));
+        pend.add(&keys.take_changes()); // a frame with no fixed step in between loses nothing
+        keys.set(KeyA, false);
+        pend.add(&keys.take_changes());
+        pend.step(&mut view);
+        assert!(view.just_released(KeyA) && !view.is_holding(KeyA));
+    }
+
+    #[test]
+    fn fixed_steps_spread_a_tap_over_two_steps() {
+        let (mut keys, mut pend, mut view) = (Keys::default(), Pending::default(), View::default());
+        tap(&mut keys, KeyA);
+        pend.add(&keys.take_changes());
+        pend.step(&mut view);
+        assert!(view.just_pressed(KeyA) && view.is_holding(KeyA)); // the tap is visible for one step
+        pend.step(&mut view);
+        assert!(view.just_released(KeyA) && !view.is_holding(KeyA));
+        pend.step(&mut view);
+        assert!(!view.just_released(KeyA));
     }
 }

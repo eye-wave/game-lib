@@ -8,7 +8,9 @@ use core::f32::consts::{FRAC_1_SQRT_2, TAU};
 use ecs::{App, Schedule::*, World};
 use gfx::{Assets, Camera2d, Color, Input, Material, Mesh, RunExt, Transform};
 use math::{Vec2, Vec3};
-use platform::input::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp, KeyA, KeyD, KeyS, KeyW};
+use platform::input::{
+    ArrowDown, ArrowLeft, ArrowRight, ArrowUp, KeyA, KeyD, KeyS, KeyW, ShiftLeft,
+};
 use shader::{Align4, include_shader};
 
 static FLAT: &Align4<[u8]> = include_shader!("flat");
@@ -86,6 +88,7 @@ fn setup(w: &mut World, _: f32) {
 /// WASD or arrows move the player on the plane; the camera follows.
 fn steer(w: &mut World, dt: f32) {
     let input = *w.resource::<Input>().unwrap();
+    let boost = input.is_holding(ShiftLeft) as u8 as f32 * 1.5 + 1.0;
     let (x, y) = (
         input.axis(&[KeyD, ArrowRight], &[KeyA, ArrowLeft]),
         input.axis(&[KeyW, ArrowUp], &[KeyS, ArrowDown]),
@@ -99,9 +102,9 @@ fn steer(w: &mut World, dt: f32) {
     let mut at = Vec2::ZERO;
     for e in w.query_of::<(Player, Transform)>() {
         let t = w.get_mut::<Transform>(e).unwrap();
-        t.pos.x = (t.pos.x + x * k * SPEED * dt).clamp(-ARENA, ARENA);
-        t.pos.y = (t.pos.y + y * k * SPEED * dt).clamp(-ARENA, ARENA);
-        t.pos.z = 0.5; // in front of every square
+        t.pos.x = (t.pos.x + x * k * SPEED * boost * dt).clamp(-ARENA, ARENA);
+        t.pos.y = (t.pos.y + y * k * SPEED * boost * dt).clamp(-ARENA, ARENA);
+
         at = t.pos.truncate();
     }
     for e in w.query_of::<(Camera2d,)>() {
@@ -117,9 +120,9 @@ fn spin(w: &mut World, dt: f32) {
 }
 
 fn game() {
-    let mut app = App::new(60.0);
+    let mut app = App::new();
     app.add_system(Startup, setup)
-        .add_system(Update, steer)
+        .add_system(Fixed, steer)
         .add_system(Update, spin);
     app.world.spawn_with((Camera2d::default(),)); // without a camera, `run` adds a 3D one
     app.run(c"2D walk: WASD or arrows, Esc quits");

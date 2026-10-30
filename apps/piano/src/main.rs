@@ -32,7 +32,7 @@ fn color(n: usize, down: bool) -> Color {
 }
 
 unsafe fn run() {
-    let mut app = App::new(60.0);
+    let mut app = App::new();
     app.world.spawn_with((Camera2d {
         pos: math::Vec2::new(3.5, 0.0),
         height: 6.0,

@@ -8,8 +8,8 @@ use core::f32::consts::FRAC_1_SQRT_2;
 use alloc::vec::Vec;
 use ecs::{App, Schedule::*, World};
 use gfx::{
-    Assets, Camera3d, Color, Input, Material, Mesh, MouseCapture, PostProcess, RunExt, Transform,
-    Vertex,
+    Assets, Camera3d, Color, FixedInput, Input, Material, Mesh, MouseCapture, PostProcess, RunExt,
+    Transform, Vertex,
 };
 use math::{FloatExt, Vec3};
 use platform::input::{KeyA, KeyD, KeyS, KeyW, Space};
@@ -180,7 +180,7 @@ const FRICTION: f32 = 12.0;
 const MAX_SPEED: f32 = 8.0;
 
 fn walk(w: &mut World, dt: f32) {
-    let input = *w.resource::<Input>().unwrap();
+    let input = *w.resource::<FixedInput>().unwrap();
     let yaw = camera(w).yaw;
 
     let (fwd, side) = (input.axis(&[KeyW], &[KeyS]), input.axis(&[KeyD], &[KeyA]));
@@ -297,13 +297,13 @@ fn follow(w: &mut World, _: f32) {
 }
 
 fn game() {
-    let mut app = App::new(60.0);
+    let mut app = App::new();
     app.add_system(Startup, setup)
         .add_system(Update, look)
-        .add_system(Update, walk)
-        .add_system(Update, collide)
+        .add_system(Fixed, walk)
+        .add_system(Fixed, collide)
         .add_system(Update, follow);
-    app.world.insert_resource(MouseCapture(true)); // mouse look needs it
+    app.world.insert_resource(MouseCapture(true));
     app.run(c"3D walk: WASD + mouse, Esc quits");
 }
 

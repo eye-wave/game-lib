@@ -64,7 +64,7 @@ fn spin(w: &mut World, dt: f32) {
 }
 
 fn game() {
-    let mut app = App::new(60.0);
+    let mut app = App::new();
     app.add_system(Startup, setup).add_system(Update, spin);
     app.world.spawn_with((Camera2d {
         viewport: [0.0, 0.0, 0.5, 1.0],

@@ -11,6 +11,7 @@ pub const SURFACE_EXT: &CStr = khr::xcb_surface::NAME;
 #[link(name = "c")]
 unsafe extern "C" {}
 
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     unsafe { libc::abort() }
@@ -355,10 +356,25 @@ pub unsafe fn mouse_delta(w: &Window, cx: i32, cy: i32) -> [f32; 2] {
 /// Drain pending events; false means the user asked to quit. `keys` is kept up to date with the held keys.
 pub unsafe fn poll(w: &Window, resized: &mut bool, keys: &mut input::Keys) -> bool {
     let mut running = true;
+    // X11 autorepeat sends KeyRelease + KeyPress (same key, same timestamp) while a key is held. A release is held
+    // back until the next event shows whether it is one of those pairs, so repeats never count as taps.
+    let mut release: Option<(u8, u32)> = None; // (keycode, time)
     loop {
         let e = xcb_poll_for_event(w.conn);
         if e.is_null() {
             break;
+        }
+        if let Some((code, time)) = release.take() {
+            if (*e).response_type & 0x7f == XCB_KEY_PRESS
+                && (*e).detail == code
+                && (*(e as *const KeyEvent)).time == time
+            {
+                libc::free(e as *mut c_void);
+                continue; // autorepeat: the key never went up
+            }
+            if let Some(k) = input::from_linux(code) {
+                keys.set(k, false);
+            }
         }
         match (*e).response_type & 0x7f {
             XCB_CLIENT_MESSAGE => {
@@ -368,11 +384,12 @@ pub unsafe fn poll(w: &Window, resized: &mut bool, keys: &mut input::Keys) -> bo
             }
             XCB_CONFIGURE_NOTIFY => *resized = true,
             XCB_KEY_PRESS if (*e).detail == KEYCODE_ESCAPE => running = false,
-            t @ (XCB_KEY_PRESS | XCB_KEY_RELEASE) => {
+            XCB_KEY_PRESS => {
                 if let Some(k) = input::from_linux((*e).detail) {
-                    keys.set(k, t == XCB_KEY_PRESS);
+                    keys.set(k, true);
                 }
             }
+            XCB_KEY_RELEASE => release = Some(((*e).detail, (*(e as *const KeyEvent)).time)),
             XCB_GE_GENERIC => {
                 let b = e as *const u8;
                 if w.xi != 0 && *b.add(1) == w.xi && b.add(8).cast::<u16>().read_unaligned() == 17 {
@@ -393,6 +410,11 @@ pub unsafe fn poll(w: &Window, resized: &mut bool, keys: &mut input::Keys) -> bo
             _ => {}
         }
         libc::free(e as *mut c_void);
+    }
+    if let Some((code, _)) = release
+        && let Some(k) = input::from_linux(code)
+    {
+        keys.set(k, false);
     }
     running
 }
