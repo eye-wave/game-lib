@@ -71,7 +71,6 @@ unsafe fn run() {
         w.insert_resource(Piano(ents));
     });
 
-    // Added before the audio pump, so this frame's key changes are mixed this frame.
     app.add_system(Schedule::Update, |w, _| {
         let input = *w.resource::<Input>().unwrap();
         let ents = w.resource::<Piano>().unwrap().0;

@@ -79,6 +79,7 @@ codes! {
     game_engine {
         MATERIAL_ATTRIBUTE_FORMAT_UNSUPPORTED_ADD_ITS_SIZE_IN_MAKE_PIPELINE = 601,
         MATERIAL_HAS_MORE_THAN_4_VERTEX_ATTRIBUTES = 602,
+        ALLOC_IN_AUDIO_THREAD = 603, // debug builds only
     }
     unknown {
         UNKNOWN_OR_UNCLASSIFIED_ERROR = 999,

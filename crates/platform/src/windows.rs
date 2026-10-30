@@ -19,9 +19,11 @@ struct Heap;
 // HeapAlloc is 16-byte aligned, nothing here asks for more
 unsafe impl GlobalAlloc for Heap {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        rt_check();
         HeapAlloc(GetProcessHeap(), 0, l.size()) as *mut u8
     }
     unsafe fn dealloc(&self, p: *mut u8, _: Layout) {
+        rt_check();
         HeapFree(GetProcessHeap(), 0, p as *mut c_void);
     }
 }
@@ -32,6 +34,11 @@ static ALLOC: Heap = Heap;
 // MSVC references this symbol when floats are used and the CRT is absent.
 #[unsafe(no_mangle)]
 static _fltused: i32 = 0;
+
+/// Cheap id of the calling thread.
+pub fn thread_id() -> usize {
+    unsafe { GetCurrentThreadId() as usize }
+}
 
 pub fn die(msg: &CStr) -> ! {
     unsafe {

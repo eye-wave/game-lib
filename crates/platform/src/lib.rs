@@ -9,6 +9,22 @@ use vulkan_sys::*;
 
 pub mod input;
 
+/// Debug builds only: id of the one thread that must not touch the heap (0 = none). The audio thread sets it,
+/// and the global allocator then aborts with `ALLOC_IN_AUDIO_THREAD` if that thread allocates or frees.
+#[cfg(debug_assertions)]
+pub static NO_ALLOC: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(debug_assertions)]
+fn rt_check() {
+    let n = NO_ALLOC.load(core::sync::atomic::Ordering::Relaxed);
+    if n != 0 && n == thread_id() {
+        die(ALLOC_IN_AUDIO_THREAD)
+    }
+}
+#[cfg(not(debug_assertions))]
+#[inline(always)]
+fn rt_check() {}
+
 #[cfg_attr(unix, path = "linux.rs")]
 #[cfg_attr(windows, path = "windows.rs")]
 mod sys;

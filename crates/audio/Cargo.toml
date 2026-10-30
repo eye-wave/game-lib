@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 ecs = { path = "../ecs" }
 math = { path = "../math" }
+platform = { path = "../platform" }

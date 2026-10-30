@@ -1,7 +1,11 @@
-// winmm waveOut: plain C, no COM, no callback. Ring of 4 x 20 ms buffers, refilled when WHDR_DONE.
+// winmm waveOut: plain C, no COM, no callback; the audio thread polls it. Ring of 4 x 20 ms buffers, refilled when WHDR_DONE.
 use super::RATE;
 use alloc::boxed::Box;
-use core::mem::{size_of, zeroed};
+use core::{
+    ffi::c_void,
+    mem::{size_of, zeroed},
+    ptr::{null, null_mut},
+};
 
 #[repr(C)]
 struct Fmt {
@@ -38,6 +42,19 @@ unsafe extern "system" {
     ) -> u32;
     fn waveOutPrepareHeader(h: isize, p: *mut Hdr, n: u32) -> u32;
     fn waveOutWrite(h: isize, p: *mut Hdr, n: u32) -> u32;
+}
+
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn CreateThread(
+        attr: *const c_void,
+        stack: usize,
+        f: unsafe extern "system" fn(*mut c_void) -> u32,
+        arg: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> isize;
+    fn Sleep(ms: u32);
 }
 
 const N: usize = 4;
@@ -89,5 +106,16 @@ impl Dev {
             waveOutWrite(s.h, &mut s.hdr[i], HDR);
             s.next = (i + 1) % N;
         }
+        Sleep(5); // buffers are 20 ms, so this never starves them
     }
+}
+
+unsafe extern "system" fn tramp(a: *mut c_void) -> u32 {
+    unsafe { crate::thread_main(a) };
+    0
+}
+
+/// Runs `thread_main(arg)` on a new thread. The thread is never joined.
+pub unsafe fn spawn(arg: *mut c_void) -> bool {
+    CreateThread(null(), 0, tramp, arg, 0, null_mut()) != 0
 }

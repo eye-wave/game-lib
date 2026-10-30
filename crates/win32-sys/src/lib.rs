@@ -51,6 +51,7 @@ mod ffi {
         pub fn HeapAlloc(heap: *mut c_void, flags: u32, size: usize) -> *mut c_void;
         pub fn HeapFree(heap: *mut c_void, flags: u32, p: *mut c_void) -> i32;
         pub fn ExitProcess(code: u32) -> !;
+        pub fn GetCurrentThreadId() -> u32;
         pub fn QueryPerformanceCounter(c: *mut i64) -> i32;
         pub fn QueryPerformanceFrequency(f: *mut i64) -> i32;
     }

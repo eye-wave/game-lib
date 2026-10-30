@@ -20,6 +20,7 @@ struct Malloc;
 
 unsafe impl GlobalAlloc for Malloc {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
+        rt_check();
         if l.align() <= 16 {
             libc::malloc(l.size()) as *mut u8
         } else {
@@ -29,12 +30,18 @@ unsafe impl GlobalAlloc for Malloc {
         }
     }
     unsafe fn dealloc(&self, p: *mut u8, _: Layout) {
+        rt_check();
         libc::free(p as *mut c_void)
     }
 }
 
 #[global_allocator]
 static ALLOC: Malloc = Malloc;
+
+/// Cheap id of the calling thread.
+pub fn thread_id() -> usize {
+    unsafe { libc::pthread_self() as usize }
+}
 
 pub fn die(msg: &CStr) -> ! {
     unsafe {
