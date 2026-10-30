@@ -1,7 +1,9 @@
 // GPU frustum culling. One thread per instance: instances whose bounding sphere touches the camera frustum are
 // appended to their group's slice of `visible`, and that group's indirect draw command counts them.
-// Must match CAP / Inst in lib.rs.
+// Each camera has its own GROUPS-sized slice of `visible` and `draws`.
+// Must match GROUPS / CAP / Inst in lib.rs.
 const CAP = 4096u;
+const GROUPS = 4u;
 
 struct Inst {
     a: vec4<f32>,     // x, y, z, yaw
@@ -19,6 +21,7 @@ struct Draw {
 struct Pc {
     vp: mat4x4<f32>, // view * projection (column-major)
     count: u32,
+    cam: u32, // which camera's slices to fill
 }
 
 @group(0) @binding(0) var<storage, read> input: array<Inst>;
@@ -53,7 +56,7 @@ fn cull(@builtin(global_invocation_id) id: vec3<u32>) {
     if outside(i.a.xyz, r) {
         return;
     }
-    let g = u32(i.s.w);
+    let g = pc.cam * GROUPS + u32(i.s.w);
     let n = atomicAdd(&draws[g].instance_count, 1u);
     visible[g * CAP + n] = i;
 }

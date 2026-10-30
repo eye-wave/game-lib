@@ -278,6 +278,24 @@ unsafe extern "system" {
         n: u32,
         stride: u32,
     );
+    pub fn vkCmdBlitImage(
+        c: vk::CommandBuffer,
+        src: vk::Image,
+        src_layout: vk::ImageLayout,
+        dst: vk::Image,
+        dst_layout: vk::ImageLayout,
+        n: u32,
+        regions: *const vk::ImageBlit,
+        filter: vk::Filter,
+    );
+    pub fn vkCmdClearColorImage(
+        c: vk::CommandBuffer,
+        image: vk::Image,
+        layout: vk::ImageLayout,
+        color: *const vk::ClearColorValue,
+        n: u32,
+        ranges: *const vk::ImageSubresourceRange,
+    );
     pub fn vkCreateImage(
         d: vk::Device,
         c: *const vk::ImageCreateInfo<'_>,

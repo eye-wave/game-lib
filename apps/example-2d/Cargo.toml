@@ -1,4 +1,3 @@
-
 [package]
 name = "example-2d"
 version = "0.1.0"
@@ -6,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 ecs = { path = "../../crates/ecs" }
+math = { path = "../../crates/math" }
 gfx = { path = "../../crates/gfx" }
 platform = { path = "../../crates/platform" }
 shader = { path = "../../crates/shader" }

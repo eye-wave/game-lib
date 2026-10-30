@@ -1,6 +1,6 @@
 //! Window, Vulkan and the 3D render loop, behind a Bevy-ish API.
 //!
-//! Game code only touches `Mesh`, `Material`, `Transform`, `Color`, `Camera`, `Handle`, `Assets`, `Input` and `app.run(..)`.
+//! Game code only touches `Mesh`, `Material`, `Transform`, `Color`, `Camera2d`, `Camera3d`, `Handle`, `Assets`, `Input` and `app.run(..)`.
 //! Rendering is instanced and GPU-culled: every frame all drawable entities go into one instance buffer, a compute
 //! shader (`cull.wgsl`) keeps the ones inside the camera frustum, and one indirect draw per (mesh, material) pair draws
 //! them into an offscreen target (with depth). A fullscreen post-process pass (`PostProcess`) then writes the swapchain.
@@ -19,7 +19,7 @@ use core::{
 };
 use ecs::App;
 use errors::prelude::*;
-use math::{FloatExt, Vec3};
+use math::{FloatExt, Vec2, Vec3};
 use platform::{die, input::Keys};
 use shader::{Align4, words};
 use vulkan_sys::*;
@@ -85,6 +85,16 @@ pub struct Material {
     pub attrs: &'static [vk::Format], // tightly packed, location = index
 }
 impl Material {
+    /// Built in, for 2D shapes: the mesh is plain `Vec3` positions, filled with the entity's `Color` (white if it has
+    /// none). `Transform.yaw` rotates about z instead of y and `scale.z` is ignored. Pairs with `Camera2d`.
+    pub fn flat() -> Self {
+        Self {
+            shader: FLAT,
+            stride: size_of::<Vec3>() as u32,
+            attrs: &[vk::Format::R32G32B32_SFLOAT],
+        }
+    }
+
     /// For `Vertex`: location 0 = pos, 1 = normal, 2 = color.
     pub const fn lit(shader: &'static Align4<[u8]>) -> Self {
         Self {
@@ -130,31 +140,73 @@ impl Transform {
 #[derive(Clone, Copy)]
 pub struct Color(pub [f32; 3]);
 
-/// Resource: the viewpoint. Right-handed, y up; at yaw 0 and pitch 0 it looks down -z, and a positive yaw turns left.
-/// `focal` is 1 / tan(vertical fov / 2). `sky` is the clear color.
+/// Component: a 3D viewpoint. Right-handed, y up; at yaw 0 and pitch 0 it looks down -z, and a positive yaw turns
+/// left. `focal` is 1 / tan(vertical fov / 2). `sky` is the clear color.
+///
+/// Every active camera (2D ones first, at most `MAX_CAMERAS`) renders the whole scene into its own target and is
+/// copied into `viewport` = [x, y, width, height], fractions of the window with y counted up from the bottom. Later
+/// cameras draw over earlier ones. The target is `scale` times the viewport's pixel size: below 1 it renders at a
+/// lower resolution and is upscaled with nearest filtering (big pixels), above 1 it is supersampled. With no
+/// active camera a default one is used.
 #[derive(Clone, Copy)]
-pub struct Camera {
-    pub pos: [f32; 3],
+pub struct Camera3d {
+    pub pos: Vec3,
     pub yaw: f32,
     pub pitch: f32,
     pub focal: f32,
     pub near: f32,
     pub far: f32,
     pub sky: [f32; 3],
+    pub viewport: [f32; 4],
+    pub scale: f32,
+    pub active: bool,
 }
-impl Default for Camera {
+impl Default for Camera3d {
     fn default() -> Self {
         Self {
-            pos: [0.0; 3],
+            pos: Vec3::ZERO,
             yaw: 0.0,
             pitch: 0.0,
             focal: 1.428, // 70 degrees
             near: 0.1,
             far: 200.0,
             sky: [0.53, 0.68, 0.85],
+            viewport: [0.0, 0.0, 1.0, 1.0],
+            scale: 1.0,
+            active: true,
         }
     }
 }
+
+/// Component: an orthographic 2D viewpoint looking at the xy plane (x right, y up). `viewport`, `scale`, `active`
+/// and drawing order work as for `Camera3d`. `height` is how many world units fit top to bottom (the width follows the window's aspect ratio).
+/// `rotation` turns the view counterclockwise, in radians. A `Transform`'s z is its layer: higher z draws in front,
+/// within +-`DEPTH2D`. Spawn one before `app.run(..)` to skip the default `Camera3d`.
+#[derive(Clone, Copy)]
+pub struct Camera2d {
+    pub pos: Vec2,
+    pub height: f32,
+    pub rotation: f32,
+    pub sky: [f32; 3],
+    pub viewport: [f32; 4],
+    pub scale: f32,
+    pub active: bool,
+}
+impl Default for Camera2d {
+    fn default() -> Self {
+        Self {
+            pos: Vec2::ZERO,
+            height: 16.0,
+            rotation: 0.0,
+            sky: [0.53, 0.68, 0.85],
+            viewport: [0.0, 0.0, 1.0, 1.0],
+            scale: 1.0,
+            active: true,
+        }
+    }
+}
+/// Layers of a `Camera2d` scene span z in [-DEPTH2D, DEPTH2D].
+pub const DEPTH2D: f32 = 100.0;
 
 /// Resource: the fullscreen post-processing shader (contract in `crates/gfx/src/post.wgsl`).
 /// `None` is a passthrough. It is built the first time it is seen, so set it any time before drawing.
@@ -396,7 +448,7 @@ unsafe fn make_swapchain(c: &Ctx, old: vk::SwapchainKHR) -> Swapchain {
             c,
             extent,
             SCENE_FORMAT,
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
+            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
             vk::ImageAspectFlags::COLOR,
         ),
         depth: make_target(
@@ -508,9 +560,12 @@ unsafe fn transition(
 
 const GROUPS: usize = 4; // distinct (mesh, material) pairs drawn per frame
 const CAP: usize = 4096; // instances per group; must match cull.wgsl
+/// Cameras drawn per frame; extra active cameras are ignored.
+pub const MAX_CAMERAS: usize = 4;
 const SCENE_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM; // offscreen color, sampled by the post pass
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 static CULL: &Align4<[u8]> = shader::include_shader!("cull");
+static FLAT: &Align4<[u8]> = shader::include_shader!("flat");
 static POST: &Align4<[u8]> = shader::include_shader!("post");
 
 /// One drawable, as the culling shader and the vertex shader read it (std430: 3 x vec4).
@@ -526,11 +581,33 @@ struct Inst {
 struct CullPc {
     vp: [f32; 16],
     count: u32,
-    _pad: [u32; 3],
+    cam: u32,
+    _pad: [u32; 2],
 }
 
-/// View * projection, column-major, depth range 0..1 (see `Camera` for the conventions).
-fn view_proj(c: &Camera, aspect: f32) -> [f32; 16] {
+/// One camera, ready to draw.
+struct View {
+    vp: [f32; 16],
+    sky: [f32; 3],
+    rect: [f32; 4], // viewport, fractions of the window, y up from the bottom
+    scale: f32,
+}
+
+/// What a camera renders into: `scale` x its viewport's pixel size, copied into the scene afterwards.
+struct CamTarget {
+    extent: vk::Extent2D,
+    color: Target,
+    depth: Target,
+}
+
+unsafe fn destroy_target(c: &Ctx, t: &Target) {
+    vkDestroyImageView(c.device, t.view, NA);
+    vkDestroyImage(c.device, t.image, NA);
+    vkFreeMemory(c.device, t.mem, NA);
+}
+
+/// View * projection, column-major, depth range 0..1 (see `Camera3d` for the conventions).
+fn view_proj(c: &Camera3d, aspect: f32) -> [f32; 16] {
     let (sy, cy, sp, cp) = (c.yaw.sin(), (c.yaw).cos(), (c.pitch).sin(), (c.pitch).cos());
     let f = [-sy * cp, sp, -cy * cp]; // forward
     let r = [cy, 0.0, -sy]; // right
@@ -539,12 +616,27 @@ fn view_proj(c: &Camera, aspect: f32) -> [f32; 16] {
     let (fx, fy) = (c.focal / aspect, c.focal);
     let a = c.far / (c.near - c.far);
     let b = c.near * c.far / (c.near - c.far);
-    let (fp, p) = (dot(f, c.pos), c.pos);
+    let p = c.pos.to_array();
+    let fp = dot(f, p);
     let rows = [
         [r[0] * fx, r[1] * fx, r[2] * fx, -dot(r, p) * fx],
         [u[0] * fy, u[1] * fy, u[2] * fy, -dot(u, p) * fy],
         [-f[0] * a, -f[1] * a, -f[2] * a, fp * a + b],
         [f[0], f[1], f[2], -fp],
+    ];
+    core::array::from_fn(|i| rows[i % 4][i / 4]) // column-major
+}
+
+/// Orthographic view * projection for `Camera2d`, same conventions as `view_proj`: depth 0..1, higher z nearer.
+fn view_proj_2d(c: &Camera2d, aspect: f32) -> [f32; 16] {
+    let (s, co) = (c.rotation.sin(), c.rotation.cos());
+    let (sy, sx) = (2.0 / c.height, 2.0 / (c.height * aspect));
+    let (px, py) = (c.pos.x, c.pos.y);
+    let rows = [
+        [co * sx, s * sx, 0.0, -(px * co + py * s) * sx],
+        [-s * sy, co * sy, 0.0, (px * s - py * co) * sy],
+        [0.0, 0.0, -0.5 / DEPTH2D, 0.5],
+        [0.0, 0.0, 0.0, 1.0],
     ];
     core::array::from_fn(|i| rows[i % 4][i / 4]) // column-major
 }
@@ -837,7 +929,11 @@ unsafe fn run(mut app: App, title: &CStr) {
     if app.world.resource::<MouseCapture>().is_none() {
         app.world.insert_resource(MouseCapture(false));
     }
-    app.world.insert_resource(Camera::default());
+    if app.world.query_of::<(Camera2d,)>().is_empty()
+        && app.world.query_of::<(Camera3d,)>().is_empty()
+    {
+        app.world.spawn_with((Camera3d::default(),));
+    }
     app.world.insert_resource(PostProcess::default());
 
     let w = platform::open(WIDTH, HEIGHT, title);
@@ -1010,13 +1106,13 @@ unsafe fn run(mut app: App, title: &CStr) {
         let input = make_buffer(&ctx, inst_bytes, storage, true);
         let visible = make_buffer(
             &ctx,
-            inst_bytes,
+            inst_bytes * MAX_CAMERAS as u64,
             storage | vk::BufferUsageFlags::VERTEX_BUFFER,
             false,
         );
         let draws = make_buffer(
             &ctx,
-            (GROUPS * size_of::<[u32; 4]>()) as u64,
+            (MAX_CAMERAS * GROUPS * size_of::<[u32; 4]>()) as u64,
             storage | vk::BufferUsageFlags::INDIRECT_BUFFER,
             true,
         );
@@ -1146,6 +1242,7 @@ unsafe fn run(mut app: App, title: &CStr) {
     let mut keys = Keys::default();
     let (mut gpu_meshes, mut pipes): (Vec<Option<GpuMesh>>, Vec<Option<vk::Pipeline>>) =
         (Vec::new(), Vec::new());
+    let mut cam_targets: [Option<CamTarget>; MAX_CAMERAS] = core::array::from_fn(|_| None);
     let mut last = platform::now();
     let start = last;
     let center = |e: vk::Extent2D| [(e.width / 2) as i32, (e.height / 2) as i32];
@@ -1224,9 +1321,42 @@ unsafe fn run(mut app: App, title: &CStr) {
         let world = &app.world;
         let meshes = world.resource::<Assets<Mesh>>().unwrap();
         let mats = world.resource::<Assets<Material>>().unwrap();
-        let cam = *world.resource::<Camera>().unwrap();
         let (ew, eh) = (sc.extent.width as f32, sc.extent.height as f32);
-        let vp = view_proj(&cam, ew / eh);
+
+        let aspect = |r: [f32; 4]| (r[2] * ew) / (r[3] * eh);
+        let mut views: Vec<View> = Vec::new();
+        for e in world.query_of::<(Camera2d,)>() {
+            let c = world.get::<Camera2d>(e).unwrap();
+            if c.active && c.viewport[2] > 0.0 && c.viewport[3] > 0.0 {
+                views.push(View {
+                    vp: view_proj_2d(c, aspect(c.viewport)),
+                    sky: c.sky,
+                    rect: c.viewport,
+                    scale: c.scale,
+                });
+            }
+        }
+        for e in world.query_of::<(Camera3d,)>() {
+            let c = world.get::<Camera3d>(e).unwrap();
+            if c.active && c.viewport[2] > 0.0 && c.viewport[3] > 0.0 {
+                views.push(View {
+                    vp: view_proj(c, aspect(c.viewport)),
+                    sky: c.sky,
+                    rect: c.viewport,
+                    scale: c.scale,
+                });
+            }
+        }
+        views.truncate(MAX_CAMERAS);
+        if views.is_empty() {
+            let c = Camera3d::default();
+            views.push(View {
+                vp: view_proj(&c, aspect(c.viewport)),
+                sky: c.sky,
+                rect: c.viewport,
+                scale: c.scale,
+            });
+        }
 
         let mut groups: Vec<(usize, usize)> = Vec::new(); // (mesh, material) per group
         let mut counts = [0usize; GROUPS];
@@ -1255,14 +1385,19 @@ unsafe fn run(mut app: App, title: &CStr) {
             });
             n += 1;
         }
-        for (g, &(mi, _)) in groups.iter().enumerate() {
-            let m = slot(&mut gpu_meshes, mi, || upload_mesh(&ctx, &meshes.0[mi]));
-            // instanceCount starts at 0; the culling shader counts survivors
-            fr.draws
-                .ptr
-                .cast::<[u32; 4]>()
-                .add(g)
-                .write([m.count, 0, 0, 0]);
+        for &(mi, _) in &groups {
+            slot(&mut gpu_meshes, mi, || upload_mesh(&ctx, &meshes.0[mi]));
+        }
+        // each camera has its own slice of `draws`; instanceCount starts at 0 and the culling shader counts survivors
+        for k in 0..views.len() {
+            for (g, &(mi, _)) in groups.iter().enumerate() {
+                let m = gpu_meshes[mi].as_ref().unwrap();
+                fr.draws
+                    .ptr
+                    .cast::<[u32; 4]>()
+                    .add(k * GROUPS + g)
+                    .write([m.count, 0, 0, 0]);
+            }
         }
         if n > 0 {
             vkCmdBindPipeline(cmd, vk::PipelineBindPoint::COMPUTE, cull_pipe);
@@ -1276,20 +1411,23 @@ unsafe fn run(mut app: App, title: &CStr) {
                 0,
                 ptr::null(),
             );
-            let pc = CullPc {
-                vp,
-                count: n as u32,
-                _pad: [0; 3],
-            };
-            vkCmdPushConstants(
-                cmd,
-                cull_layout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                size_of::<CullPc>() as u32,
-                ptr::from_ref(&pc).cast(),
-            );
-            vkCmdDispatch(cmd, (n as u32).div_ceil(64), 1, 1);
+            for (k, v) in views.iter().enumerate() {
+                let pc = CullPc {
+                    vp: v.vp,
+                    count: n as u32,
+                    cam: k as u32,
+                    _pad: [0; 2],
+                };
+                vkCmdPushConstants(
+                    cmd,
+                    cull_layout,
+                    vk::ShaderStageFlags::COMPUTE,
+                    0,
+                    size_of::<CullPc>() as u32,
+                    ptr::from_ref(&pc).cast(),
+                );
+                vkCmdDispatch(cmd, (n as u32).div_ceil(64), 1, 1);
+            }
             let barrier = [vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                 .dst_access_mask(
@@ -1309,7 +1447,8 @@ unsafe fn run(mut app: App, title: &CStr) {
             );
         }
 
-        // ---- scene pass: offscreen color + depth
+        // ---- the scene image is only copied into: clear it, then each camera renders to its own target and is
+        // blitted into its viewport
         let area = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: sc.extent,
@@ -1328,102 +1467,246 @@ unsafe fn run(mut app: App, title: &CStr) {
             vk::ImageAspectFlags::COLOR,
             (
                 vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
             ),
             // waits for the previous frame's post pass to finish reading this image
             (
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::TRANSFER,
             ),
-            (
-                vk::AccessFlags::empty(),
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-            ),
+            (vk::AccessFlags::empty(), vk::AccessFlags::TRANSFER_WRITE),
         );
-        transition(
+        let black = vk::ClearColorValue {
+            float32: [0.0, 0.0, 0.0, 1.0],
+        };
+        let whole = color_range();
+        vkCmdClearColorImage(
             cmd,
-            sc.depth.image,
-            vk::ImageAspectFlags::DEPTH,
-            (
-                vk::ImageLayout::UNDEFINED,
-                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-            ),
-            (
-                vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
-                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
-            ),
-            (
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
-                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            ),
+            sc.scene.image,
+            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            &black,
+            1,
+            &whole,
         );
-        let color = [vk::RenderingAttachmentInfo::default()
-            .image_view(sc.scene.view)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [cam.sky[0], cam.sky[1], cam.sky[2], 1.0],
-                },
-            })];
-        let depth = vk::RenderingAttachmentInfo::default()
-            .image_view(sc.depth.view)
-            .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::DONT_CARE)
-            .clear_value(vk::ClearValue {
-                depth_stencil: vk::ClearDepthStencilValue {
-                    depth: 1.0,
-                    stencil: 0,
-                },
+
+        for (k, v) in views.iter().enumerate() {
+            let ext = vk::Extent2D {
+                width: ((v.rect[2] * ew * v.scale) as u32).max(1),
+                height: ((v.rect[3] * eh * v.scale) as u32).max(1),
+            };
+            if cam_targets[k].as_ref().is_some_and(|t| t.extent != ext) {
+                ck(vkDeviceWaitIdle(device), WAIT_FOR_DEVICE_IDLE_FAILED);
+                let old = cam_targets[k].take().unwrap();
+                destroy_target(&ctx, &old.color);
+                destroy_target(&ctx, &old.depth);
+            }
+            let t = cam_targets[k].get_or_insert_with(|| CamTarget {
+                extent: ext,
+                color: make_target(
+                    &ctx,
+                    ext,
+                    SCENE_FORMAT,
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+                    vk::ImageAspectFlags::COLOR,
+                ),
+                depth: make_target(
+                    &ctx,
+                    ext,
+                    DEPTH_FORMAT,
+                    vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                    vk::ImageAspectFlags::DEPTH,
+                ),
             });
-        vkCmdBeginRendering(
-            cmd,
-            &vk::RenderingInfo::default()
-                .render_area(area)
-                .layer_count(1)
-                .color_attachments(&color)
-                .depth_attachment(&depth),
-        );
-        vkCmdSetViewport(cmd, 0, 1, &viewport);
-        vkCmdSetScissor(cmd, 0, 1, &area);
-        for (g, &(mi, ma)) in groups.iter().enumerate() {
-            // one pipeline bind per group; fine while groups are few.
-            let pipe = *slot(&mut pipes, ma, || {
-                make_pipeline(&ctx, layout, SCENE_FORMAT, &mats.0[ma])
-            });
-            let m = gpu_meshes[mi].as_ref().unwrap();
-            vkCmdBindPipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
-            vkCmdPushConstants(
+            let t_area = vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent: ext,
+            };
+            let t_viewport = vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: ext.width as f32,
+                height: ext.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            };
+            transition(
                 cmd,
-                layout,
-                vk::ShaderStageFlags::VERTEX,
-                0,
-                size_of::<[f32; 16]>() as u32,
-                vp.as_ptr().cast(),
+                t.color.image,
+                vk::ImageAspectFlags::COLOR,
+                (
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                ),
+                // waits for the previous frame's blit to finish reading this image
+                (
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                ),
+                (
+                    vk::AccessFlags::empty(),
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                ),
             );
-            let bufs = [m.buf, fr.visible.buf];
-            let offs = [0, (g * CAP * size_of::<Inst>()) as u64];
-            vkCmdBindVertexBuffers(cmd, 0, 2, bufs.as_ptr(), offs.as_ptr());
-            vkCmdDrawIndirect(cmd, fr.draws.buf, (g * size_of::<[u32; 4]>()) as u64, 1, 16);
+            transition(
+                cmd,
+                t.depth.image,
+                vk::ImageAspectFlags::DEPTH,
+                (
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+                ),
+                (
+                    vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                    vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+                ),
+                (
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                    vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                        | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                ),
+            );
+            let color = [vk::RenderingAttachmentInfo::default()
+                .image_view(t.color.view)
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [v.sky[0], v.sky[1], v.sky[2], 1.0],
+                    },
+                })];
+            let depth = vk::RenderingAttachmentInfo::default()
+                .image_view(t.depth.view)
+                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 1.0,
+                        stencil: 0,
+                    },
+                });
+            vkCmdBeginRendering(
+                cmd,
+                &vk::RenderingInfo::default()
+                    .render_area(t_area)
+                    .layer_count(1)
+                    .color_attachments(&color)
+                    .depth_attachment(&depth),
+            );
+            vkCmdSetViewport(cmd, 0, 1, &t_viewport);
+            vkCmdSetScissor(cmd, 0, 1, &t_area);
+            for (g, &(mi, ma)) in groups.iter().enumerate() {
+                // one pipeline bind per group; fine while groups are few.
+                let pipe = *slot(&mut pipes, ma, || {
+                    make_pipeline(&ctx, layout, SCENE_FORMAT, &mats.0[ma])
+                });
+                let m = gpu_meshes[mi].as_ref().unwrap();
+                let slice = k * GROUPS + g; // this camera's slice of `visible` and `draws`
+                vkCmdBindPipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
+                vkCmdPushConstants(
+                    cmd,
+                    layout,
+                    vk::ShaderStageFlags::VERTEX,
+                    0,
+                    size_of::<[f32; 16]>() as u32,
+                    v.vp.as_ptr().cast(),
+                );
+                let bufs = [m.buf, fr.visible.buf];
+                let offs = [0, (slice * CAP * size_of::<Inst>()) as u64];
+                vkCmdBindVertexBuffers(cmd, 0, 2, bufs.as_ptr(), offs.as_ptr());
+                vkCmdDrawIndirect(
+                    cmd,
+                    fr.draws.buf,
+                    (slice * size_of::<[u32; 4]>()) as u64,
+                    1,
+                    16,
+                );
+            }
+            vkCmdEndRendering(cmd);
+            transition(
+                cmd,
+                t.color.image,
+                vk::ImageAspectFlags::COLOR,
+                (
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                ),
+                (
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::TRANSFER,
+                ),
+                (
+                    vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    vk::AccessFlags::TRANSFER_READ,
+                ),
+            );
+            // the clear and earlier blits must land before this one (later cameras draw over earlier ones)
+            let order = [vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)];
+            vkCmdPipelineBarrier(
+                cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::DependencyFlags::empty(),
+                1,
+                order.as_ptr(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+            );
+            let layers = vk::ImageSubresourceLayers::default()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .layer_count(1);
+            let at = |x: f32, y: f32, z: i32| vk::Offset3D {
+                x: x as i32,
+                y: y as i32,
+                z,
+            };
+            let region = [vk::ImageBlit::default()
+                .src_subresource(layers)
+                .src_offsets([at(0.0, 0.0, 0), at(ext.width as f32, ext.height as f32, 1)])
+                .dst_subresource(layers)
+                .dst_offsets([
+                    at(v.rect[0] * ew, v.rect[1] * eh, 0),
+                    at(
+                        (v.rect[0] + v.rect[2]) * ew,
+                        (v.rect[1] + v.rect[3]) * eh,
+                        1,
+                    ),
+                ])];
+            let filter = if v.scale < 1.0 {
+                vk::Filter::NEAREST // big, crisp pixels
+            } else {
+                vk::Filter::LINEAR
+            };
+            vkCmdBlitImage(
+                cmd,
+                t.color.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                sc.scene.image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                1,
+                region.as_ptr(),
+                filter,
+            );
         }
-        vkCmdEndRendering(cmd);
         transition(
             cmd,
             sc.scene.image,
             vk::ImageAspectFlags::COLOR,
             (
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
             ),
             (
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::TRANSFER,
                 vk::PipelineStageFlags::FRAGMENT_SHADER,
             ),
             (
-                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                vk::AccessFlags::TRANSFER_WRITE,
                 vk::AccessFlags::SHADER_READ,
             ),
         );

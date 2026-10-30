@@ -42,4 +42,4 @@ bundle app="" dir="target/bundle":
         cp "target/{{target}}/release/$name{{exe}}" "{{dir}}/"; \
     done
     echo "Bundled apps:"
-    ls -lh "{{dir}}"
+    stat -c '%n %s' target/bundle/* | awk '{printf "%s %.2f KiB\n", $1, $2/1024}'

@@ -6,7 +6,8 @@ extern crate alloc;
 use core::f32::consts::{FRAC_1_SQRT_2, TAU};
 
 use ecs::{App, Schedule::*, World};
-use gfx::{Assets, Camera, Color, Input, Material, Mesh, RunExt, Transform};
+use gfx::{Assets, Camera2d, Color, Input, Material, Mesh, RunExt, Transform};
+use math::{Vec2, Vec3};
 use platform::input::{ArrowDown, ArrowLeft, ArrowRight, ArrowUp, KeyA, KeyD, KeyS, KeyW};
 use shader::{Align4, include_shader};
 
@@ -15,7 +16,6 @@ static FLAT: &Align4<[u8]> = include_shader!("flat");
 const ARENA: f32 = 32.0; // half-size of the play field
 const SQUARES: usize = 300;
 const SPEED: f32 = 8.0;
-const CAM_Z: f32 = 12.0; // the camera looks straight down -z at the xy plane
 
 struct Player;
 struct Spin(f32); // radians per second
@@ -50,23 +50,20 @@ fn setup(w: &mut World, _: f32) {
         stride: size_of::<Vertex2>() as u32,
         attrs: &[gfx::vk::Format::R32G32B32_SFLOAT; 2],
     });
-    w.resource_mut::<Camera>().unwrap().pos[2] = CAM_Z;
-
-    // ponytail: squares are scattered by a fixed formula, not an RNG; swap in a real one if you want it to vary per run.
+    // squares are scattered by a fixed formula, not an RNG; swap in a real one if you want it to vary per run.
     for i in 0..SQUARES {
         let f = |k: usize, m: usize| (i * k % m) as f32 / m as f32; // 0..1, different pattern per k
         let size = 0.6 + f(5, 7);
         w.spawn_with((
             Spin((f(3, 11) - 0.5) * 2.0),
             Transform {
-                pos: [
+                pos: Vec3::new(
                     (f(37, 61) * 2.0 - 1.0) * ARENA,
                     (f(53, 59) * 2.0 - 1.0) * ARENA,
                     -1.0 + f(1, SQUARES) * 0.5,
-                ]
-                .into(),
+                ),
                 yaw: f(7, 13) * TAU,
-                scale: [size, size, 1.0].into(),
+                scale: Vec3::new(size, size, 1.0),
             },
             quad,
             material,
@@ -99,15 +96,17 @@ fn steer(w: &mut World, dt: f32) {
         1.0
     };
 
-    let mut at = [0.0; 2];
+    let mut at = Vec2::ZERO;
     for e in w.query_of::<(Player, Transform)>() {
         let t = w.get_mut::<Transform>(e).unwrap();
         t.pos.x = (t.pos.x + x * k * SPEED * dt).clamp(-ARENA, ARENA);
         t.pos.y = (t.pos.y + y * k * SPEED * dt).clamp(-ARENA, ARENA);
         t.pos.z = 0.5; // in front of every square
-        at = [t.pos.x, t.pos.y];
+        at = t.pos.truncate();
     }
-    w.resource_mut::<Camera>().unwrap().pos = [at[0], at[1], CAM_Z];
+    for e in w.query_of::<(Camera2d,)>() {
+        w.get_mut::<Camera2d>(e).unwrap().pos = at;
+    }
 }
 
 fn spin(w: &mut World, dt: f32) {
@@ -122,6 +121,7 @@ fn game() {
     app.add_system(Startup, setup)
         .add_system(Update, steer)
         .add_system(Update, spin);
+    app.world.spawn_with((Camera2d::default(),)); // without a camera, `run` adds a 3D one
     app.run(c"2D walk: WASD or arrows, Esc quits");
 }
 

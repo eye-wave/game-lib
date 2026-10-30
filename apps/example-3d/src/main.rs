@@ -8,7 +8,7 @@ use core::f32::consts::FRAC_1_SQRT_2;
 use alloc::vec::Vec;
 use ecs::{App, Schedule::*, World};
 use gfx::{
-    Assets, Camera, Color, Input, Material, Mesh, MouseCapture, PostProcess, RunExt, Transform,
+    Assets, Camera3d, Color, Input, Material, Mesh, MouseCapture, PostProcess, RunExt, Transform,
     Vertex,
 };
 use math::{FloatExt, Vec3};
@@ -29,6 +29,12 @@ const HEIGHT: f32 = EYE + 0.2; // player collision height (feet to head)
 const GRAVITY: f32 = 30.0;
 const JUMP_FORCE: f32 = 20.0;
 const TERMINAL_VELOCITY: f32 = 50.0;
+
+/// The (first) 3D camera entity; `run` spawns one if the app didn't.
+fn camera(w: &mut World) -> &mut Camera3d {
+    let e = w.query_of::<(Camera3d,)>()[0];
+    w.get_mut::<Camera3d>(e).unwrap()
+}
 
 // ---- components
 struct Player;
@@ -69,9 +75,10 @@ fn cube_mesh() -> Mesh {
             let (mut n, mut u, mut w) = ([0.0; 3], [0.0; 3], [0.0; 3]);
             (n[a], u[(a + 1) % 3], w[(a + 2) % 3]) = (sign, 1.0, 1.0);
             let corner = |su: f32, sw: f32| Vertex {
-                pos: core::array::from_fn(|i| 0.5 * (n[i] + su * u[i] + sw * w[i])).into(),
+                pos: core::array::from_fn::<f32, 3, _>(|i| 0.5 * (n[i] + su * u[i] + sw * w[i]))
+                    .into(),
                 normal: n.into(),
-                color: Vec3::splat(1.0),
+                color: Vec3::ONE,
             };
             for (su, sw) in [
                 (-1.0, -1.0),
@@ -162,7 +169,7 @@ fn setup(w: &mut World, _: f32) {
 /// Mouse look. Moving right turns right (yaw is counter-clockwise), moving down looks down.
 fn look(w: &mut World, _: f32) {
     let d = w.resource::<Input>().unwrap().mouse_delta();
-    let c = w.resource_mut::<Camera>().unwrap();
+    let c = camera(w);
     c.yaw -= d[0] * SENSITIVITY;
     c.pitch = (c.pitch - d[1] * SENSITIVITY).clamp(-1.5, 1.5);
 }
@@ -174,7 +181,7 @@ const MAX_SPEED: f32 = 8.0;
 
 fn walk(w: &mut World, dt: f32) {
     let input = *w.resource::<Input>().unwrap();
-    let yaw = w.resource::<Camera>().unwrap().yaw;
+    let yaw = camera(w).yaw;
 
     let (fwd, side) = (input.axis(&[KeyW], &[KeyS]), input.axis(&[KeyD], &[KeyA]));
 
@@ -244,32 +251,32 @@ fn collide(w: &mut World, _: f32) {
         for &s in &solids {
             let t = w.get::<Transform>(s).unwrap();
             // centre-to-centre; the player's centre is half its height above its feet
-            let d = [
+            let d = Vec3::new(
                 pos.x - t.pos.x,
                 pos.y + HEIGHT * 0.5 - t.pos.y,
                 pos.z - t.pos.z,
-            ];
-            let pen = [
-                t.scale.x * 0.5 + RADIUS - (d[0]).abs(),
-                t.scale.y * 0.5 + HEIGHT * 0.5 - (d[1]).abs(),
-                t.scale.z * 0.5 + RADIUS - (d[2]).abs(),
-            ];
-            if pen[0] <= 0.0 || pen[1] <= 0.0 || pen[2] <= 0.0 {
+            );
+            let pen = Vec3::new(
+                t.scale.x * 0.5 + RADIUS - d.x.abs(),
+                t.scale.y * 0.5 + HEIGHT * 0.5 - d.y.abs(),
+                t.scale.z * 0.5 + RADIUS - d.z.abs(),
+            );
+            if pen.x <= 0.0 || pen.y <= 0.0 || pen.z <= 0.0 {
                 continue;
             }
 
             let v = w.get_mut::<Velocity>(p).unwrap();
             let sign = |x: f32| if x < 0.0 { -1.0 } else { 1.0 };
 
-            if pen[0] < pen[1] && pen[0] < pen[2] {
-                pos.x += sign(d[0]) * pen[0];
+            if pen.x < pen.y && pen.x < pen.z {
+                pos.x += sign(d.x) * pen.x;
                 v.x = 0.0;
-            } else if pen[2] < pen[1] {
-                pos.z += sign(d[2]) * pen[2];
+            } else if pen.z < pen.y {
+                pos.z += sign(d.z) * pen.z;
                 v.z = 0.0;
             } else {
-                pos.y += sign(d[1]) * pen[1];
-                if d[1] > 0.0 {
+                pos.y += sign(d.y) * pen.y;
+                if d.y > 0.0 {
                     v.grounded = true; // landed on top
                     v.y = v.y.max(0.0);
                 } else {
@@ -285,7 +292,7 @@ fn collide(w: &mut World, _: f32) {
 fn follow(w: &mut World, _: f32) {
     if let Some(&p) = w.query_of::<(Player, Transform)>().first() {
         let pos = w.get::<Transform>(p).unwrap().pos;
-        w.resource_mut::<Camera>().unwrap().pos = [pos.x, pos.y + EYE, pos.z];
+        camera(w).pos = Vec3::new(pos.x, pos.y + EYE, pos.z);
     }
 }
 
@@ -296,7 +303,7 @@ fn game() {
         .add_system(Update, walk)
         .add_system(Update, collide)
         .add_system(Update, follow);
-    app.world.insert_resource(MouseCapture(true));
+    app.world.insert_resource(MouseCapture(true)); // mouse look needs it
     app.run(c"3D walk: WASD + mouse, Esc quits");
 }
 

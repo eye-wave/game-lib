@@ -2,128 +2,34 @@ use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAss
 
 use crate::{Vec3, sys::FloatExt};
 
-#[derive(Clone, Copy, PartialEq)]
-#[repr(C)]
-pub struct Vec2 {
-    pub x: f32,
-    pub y: f32,
-}
-
-impl From<[f32; 2]> for Vec2 {
-    #[inline]
-    fn from(v: [f32; 2]) -> Self {
-        Self::new(v[0], v[1])
-    }
-}
+vec_impl!(Vec2, 2, x, y);
 
 impl Vec2 {
-    pub const ZERO: Self = Self::splat(0.0);
-    pub const ONE: Self = Self::splat(1.0);
-
+    /// Unit vector at `angle` radians counterclockwise from +x.
     #[inline]
     #[must_use]
-    pub const fn splat(v: f32) -> Self {
-        Self { x: v, y: v }
+    pub fn from_angle(angle: f32) -> Self {
+        Self::new(angle.cos(), angle.sin())
     }
 
-    #[inline(always)]
-    #[must_use]
-    pub const fn new(x: f32, y: f32) -> Self {
-        Self { x, y }
-    }
-
+    /// Rotated 90 degrees counterclockwise.
     #[inline]
     #[must_use]
-    pub fn dot(self, rhs: Self) -> f32 {
-        (self.x * rhs.x) + (self.y * rhs.y)
+    pub const fn perp(self) -> Self {
+        Self::new(-self.y, self.x)
     }
 
+    /// Rotated `angle` radians counterclockwise.
     #[inline]
     #[must_use]
-    pub fn length(self) -> f32 {
-        self.dot(self).sqrt()
+    pub fn rotate(self, angle: f32) -> Self {
+        let (s, c) = (angle.sin(), angle.cos());
+        Self::new(self.x * c - self.y * s, self.x * s + self.y * c)
     }
 
     #[inline]
     #[must_use]
     pub const fn extend(self, z: f32) -> Vec3 {
         Vec3::new(self.x, self.y, z)
-    }
-}
-
-impl Add for Vec2 {
-    type Output = Self;
-
-    #[inline]
-    fn add(self, rhs: Self) -> Self {
-        Self::new(self.x + rhs.x, self.y + rhs.y)
-    }
-}
-
-impl Sub for Vec2 {
-    type Output = Self;
-
-    #[inline]
-    fn sub(self, rhs: Self) -> Self {
-        Self::new(self.x - rhs.x, self.y - rhs.y)
-    }
-}
-
-impl Mul<f32> for Vec2 {
-    type Output = Self;
-
-    #[inline]
-    fn mul(self, rhs: f32) -> Self {
-        Self::new(self.x * rhs, self.y * rhs)
-    }
-}
-
-impl Div<f32> for Vec2 {
-    type Output = Self;
-
-    #[inline]
-    fn div(self, rhs: f32) -> Self {
-        Self::new(self.x / rhs, self.y / rhs)
-    }
-}
-
-impl Neg for Vec2 {
-    type Output = Self;
-
-    #[inline]
-    fn neg(self) -> Self {
-        Self::new(-self.x, -self.y)
-    }
-}
-
-impl AddAssign for Vec2 {
-    #[inline]
-    fn add_assign(&mut self, rhs: Self) {
-        self.x += rhs.x;
-        self.y += rhs.y;
-    }
-}
-
-impl SubAssign for Vec2 {
-    #[inline]
-    fn sub_assign(&mut self, rhs: Self) {
-        self.x -= rhs.x;
-        self.y -= rhs.y;
-    }
-}
-
-impl MulAssign<f32> for Vec2 {
-    #[inline]
-    fn mul_assign(&mut self, rhs: f32) {
-        self.x *= rhs;
-        self.y *= rhs;
-    }
-}
-
-impl DivAssign<f32> for Vec2 {
-    #[inline]
-    fn div_assign(&mut self, rhs: f32) {
-        self.x /= rhs;
-        self.y /= rhs;
     }
 }

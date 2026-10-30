@@ -1,0 +1,13 @@
+[package]
+name = "layers-example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ecs = { path = "../../crates/ecs" }
+gfx = { path = "../../crates/gfx" }
+math = { path = "../../crates/math" }
+platform = { path = "../../crates/platform" }
+
+[build-dependencies]
+win32-sys = { path = "../../crates/win32-sys", features = ["build"] }

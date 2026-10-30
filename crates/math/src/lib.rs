@@ -1,5 +1,7 @@
 #![no_std]
 
+#[macro_use]
+mod vec;
 mod sys;
 mod vec2;
 mod vec3;
