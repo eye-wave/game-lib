@@ -28,4 +28,5 @@ float_ext! {
     sin = sinf;
     cos = cosf;
     abs = fabsf;
+    exp2 = exp2f;
 }
