@@ -19,7 +19,7 @@ use core::{
 };
 use ecs::App;
 use errors::prelude::*;
-use math::FloatExt;
+use math::{FloatExt, Vec3};
 use platform::{die, input::Keys};
 use shader::{Align4, words};
 use vulkan_sys::*;
@@ -98,18 +98,18 @@ impl Material {
 /// Position, normal and color: the vertex of `Material::lit`.
 #[repr(C)]
 pub struct Vertex {
-    pub pos: [f32; 3],
-    pub normal: [f32; 3],
-    pub color: [f32; 3],
+    pub pos: Vec3,
+    pub normal: Vec3,
+    pub color: Vec3,
 }
 
 /// World position (y up), rotation about the y axis in radians, and per-axis scale.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Transform {
-    pub pos: [f32; 3],
+    pub pos: Vec3,
     pub yaw: f32,
-    pub scale: [f32; 3],
+    pub scale: Vec3,
 }
 impl Default for Transform {
     fn default() -> Self {
@@ -119,9 +119,9 @@ impl Default for Transform {
 impl Transform {
     pub const fn from_pos(x: f32, y: f32, z: f32) -> Self {
         Self {
-            pos: [x, y, z],
+            pos: Vec3::new(x, y, z),
             yaw: 0.0,
-            scale: [1.0; 3],
+            scale: Vec3::splat(1.0),
         }
     }
 }
@@ -1249,8 +1249,8 @@ unsafe fn run(mut app: App, title: &CStr) {
             let t = world.get::<Transform>(e).unwrap();
             let c = world.get::<Color>(e).map_or([1.0; 3], |c| c.0);
             fr.input.ptr.cast::<Inst>().add(n).write(Inst {
-                a: [t.pos[0], t.pos[1], t.pos[2], t.yaw],
-                s: [t.scale[0], t.scale[1], t.scale[2], g as f32],
+                a: [t.pos.x, t.pos.y, t.pos.z, t.yaw],
+                s: [t.scale.x, t.scale.y, t.scale.z, g as f32],
                 color: [c[0], c[1], c[2], meshes.0[mi].radius2],
             });
             n += 1;

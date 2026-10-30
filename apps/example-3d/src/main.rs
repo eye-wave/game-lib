@@ -11,7 +11,7 @@ use gfx::{
     Assets, Camera, Color, Input, Material, Mesh, MouseCapture, PostProcess, RunExt, Transform,
     Vertex,
 };
-use math::FloatExt;
+use math::{FloatExt, Vec3};
 use platform::input::{KeyA, KeyD, KeyS, KeyW, Space};
 use shader::{Align4, include_shader};
 
@@ -69,9 +69,9 @@ fn cube_mesh() -> Mesh {
             let (mut n, mut u, mut w) = ([0.0; 3], [0.0; 3], [0.0; 3]);
             (n[a], u[(a + 1) % 3], w[(a + 2) % 3]) = (sign, 1.0, 1.0);
             let corner = |su: f32, sw: f32| Vertex {
-                pos: core::array::from_fn(|i| 0.5 * (n[i] + su * u[i] + sw * w[i])),
-                normal: n,
-                color: [1.0; 3],
+                pos: core::array::from_fn(|i| 0.5 * (n[i] + su * u[i] + sw * w[i])).into(),
+                normal: n.into(),
+                color: Vec3::splat(1.0),
             };
             for (su, sw) in [
                 (-1.0, -1.0),
@@ -96,13 +96,13 @@ fn plane_mesh() -> Mesh {
         for j in 0..n {
             let g = if (i + j) % 2 == 0 { 0.5 } else { 0.38 };
             let at = |di: usize, dj: usize| Vertex {
-                pos: [
+                pos: Vec3::new(
                     (i + di) as f32 * 2.0 - ARENA,
                     0.0,
                     (j + dj) as f32 * 2.0 - ARENA,
-                ],
-                normal: [0.0, 1.0, 0.0],
-                color: [g * 0.85, g, g * 0.85],
+                ),
+                normal: Vec3::new(0.0, 1.0, 0.0),
+                color: Vec3::new(g * 0.85, g, g * 0.85),
             };
             for (di, dj) in [(0, 0), (1, 0), (1, 1), (0, 0), (1, 1), (0, 1)] {
                 v.push(at(di, dj));
@@ -144,9 +144,9 @@ fn setup(w: &mut World, _: f32) {
         w.spawn_with((
             Solid,
             Transform {
-                pos: [x, height * 0.5, z],
+                pos: Vec3::new(x, height * 0.5, z),
                 yaw: 0.0,
-                scale: [width, height, width],
+                scale: Vec3::new(width, height, width),
             },
             cube,
             material,
@@ -222,12 +222,12 @@ fn walk(w: &mut World, dt: f32) {
 
         let (vx, vy, vz) = (v.x, v.y, v.z);
 
-        t.pos[0] = (t.pos[0] + vx * dt).clamp(-ARENA + RADIUS, ARENA - RADIUS);
-        t.pos[1] = (t.pos[1] + vy * dt).max(0.0);
-        t.pos[2] = (t.pos[2] + vz * dt).clamp(-ARENA + RADIUS, ARENA - RADIUS);
+        t.pos.x = (t.pos.x + vx * dt).clamp(-ARENA + RADIUS, ARENA - RADIUS);
+        t.pos.y = (t.pos.y + vy * dt).max(0.0);
+        t.pos.z = (t.pos.z + vz * dt).clamp(-ARENA + RADIUS, ARENA - RADIUS);
 
         v.grounded = false; // collide() sets it again when we land on a box
-        if t.pos[1] == 0.0 && v.y < 0.0 {
+        if t.pos.y == 0.0 && v.y < 0.0 {
             v.y = 0.0;
             v.grounded = true;
         }
@@ -245,14 +245,14 @@ fn collide(w: &mut World, _: f32) {
             let t = w.get::<Transform>(s).unwrap();
             // centre-to-centre; the player's centre is half its height above its feet
             let d = [
-                pos[0] - t.pos[0],
-                pos[1] + HEIGHT * 0.5 - t.pos[1],
-                pos[2] - t.pos[2],
+                pos.x - t.pos.x,
+                pos.y + HEIGHT * 0.5 - t.pos.y,
+                pos.z - t.pos.z,
             ];
             let pen = [
-                t.scale[0] * 0.5 + RADIUS - (d[0]).abs(),
-                t.scale[1] * 0.5 + HEIGHT * 0.5 - (d[1]).abs(),
-                t.scale[2] * 0.5 + RADIUS - (d[2]).abs(),
+                t.scale.x * 0.5 + RADIUS - (d[0]).abs(),
+                t.scale.y * 0.5 + HEIGHT * 0.5 - (d[1]).abs(),
+                t.scale.z * 0.5 + RADIUS - (d[2]).abs(),
             ];
             if pen[0] <= 0.0 || pen[1] <= 0.0 || pen[2] <= 0.0 {
                 continue;
@@ -262,13 +262,13 @@ fn collide(w: &mut World, _: f32) {
             let sign = |x: f32| if x < 0.0 { -1.0 } else { 1.0 };
 
             if pen[0] < pen[1] && pen[0] < pen[2] {
-                pos[0] += sign(d[0]) * pen[0];
+                pos.x += sign(d[0]) * pen[0];
                 v.x = 0.0;
             } else if pen[2] < pen[1] {
-                pos[2] += sign(d[2]) * pen[2];
+                pos.z += sign(d[2]) * pen[2];
                 v.z = 0.0;
             } else {
-                pos[1] += sign(d[1]) * pen[1];
+                pos.y += sign(d[1]) * pen[1];
                 if d[1] > 0.0 {
                     v.grounded = true; // landed on top
                     v.y = v.y.max(0.0);
@@ -285,7 +285,7 @@ fn collide(w: &mut World, _: f32) {
 fn follow(w: &mut World, _: f32) {
     if let Some(&p) = w.query_of::<(Player, Transform)>().first() {
         let pos = w.get::<Transform>(p).unwrap().pos;
-        w.resource_mut::<Camera>().unwrap().pos = [pos[0], pos[1] + EYE, pos[2]];
+        w.resource_mut::<Camera>().unwrap().pos = [pos.x, pos.y + EYE, pos.z];
     }
 }
 

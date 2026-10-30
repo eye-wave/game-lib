@@ -63,9 +63,10 @@ fn setup(w: &mut World, _: f32) {
                     (f(37, 61) * 2.0 - 1.0) * ARENA,
                     (f(53, 59) * 2.0 - 1.0) * ARENA,
                     -1.0 + f(1, SQUARES) * 0.5,
-                ],
+                ]
+                .into(),
                 yaw: f(7, 13) * TAU,
-                scale: [size, size, 1.0],
+                scale: [size, size, 1.0].into(),
             },
             quad,
             material,
@@ -101,10 +102,10 @@ fn steer(w: &mut World, dt: f32) {
     let mut at = [0.0; 2];
     for e in w.query_of::<(Player, Transform)>() {
         let t = w.get_mut::<Transform>(e).unwrap();
-        t.pos[0] = (t.pos[0] + x * k * SPEED * dt).clamp(-ARENA, ARENA);
-        t.pos[1] = (t.pos[1] + y * k * SPEED * dt).clamp(-ARENA, ARENA);
-        t.pos[2] = 0.5; // in front of every square
-        at = [t.pos[0], t.pos[1]];
+        t.pos.x = (t.pos.x + x * k * SPEED * dt).clamp(-ARENA, ARENA);
+        t.pos.y = (t.pos.y + y * k * SPEED * dt).clamp(-ARENA, ARENA);
+        t.pos.z = 0.5; // in front of every square
+        at = [t.pos.x, t.pos.y];
     }
     w.resource_mut::<Camera>().unwrap().pos = [at[0], at[1], CAM_Z];
 }
