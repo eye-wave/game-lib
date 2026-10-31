@@ -1,24 +1,30 @@
-//! Image and audio decoding by the OS, so no decoder lives in the binary. Errors are `die`-ready codes from `errors`.
-//! The caller names the format (`png`, `jpeg`, `webp`, `wav`, `ogg`, `mp3`), so the linker drops the ones a game never calls.
-//! Images come out as 8-bit RGBA (straight alpha, top row first), sounds as interleaved 16-bit PCM at the file's own rate.
-//! Linux dlopens libpng, libturbojpeg, libwebp, libvorbisfile and libmpg123; each is only needed for its own format.
-//! Windows uses GDI+ for PNG/JPEG, WIC for WebP (needs Microsoft's "WebP Image Extensions") and Media Foundation for
-//! MP3/Ogg (Ogg needs the "Web Media Extensions"). WAV is parsed here: smaller than any binding.
+//! Image and sound loading through one spawned `ffmpeg` process per file, so no decoder lives in the binary and any
+//! format ffmpeg knows works. ffmpeg must be on PATH (`FFMPEG_MISSING` otherwise). Errors are `die`-ready codes.
+//!
+//! `Loader` is the asset system: queue files, call `poll` once per frame, read `progress`/`status`, `take` what is
+//! ready. An asset is `Pending` (queued, waiting for a free slot: at most `MAX_RUNNING` ffmpegs at a time),
+//! `Loading` (ffmpeg running, its output being collected), then `Ready` or `Failed(code)`. Nothing blocks except
+//! `Loader::wait` and `load_image`, which are for tools and tests.
+//!
+//! Images come out as 8-bit RGBA (straight alpha, top row first, ffmpeg's PAM output), sounds as mono 16-bit PCM at
+//! 48 kHz (the rate `audio` plays at, and it mixes everything down to mono anyway).
 #![no_std]
 extern crate alloc;
 
 use alloc::vec::Vec;
 use core::ffi::CStr;
-use errors::assets::AUDIO_DECODE_FAILED;
+use errors::assets::*;
+use platform::{Child, Read};
 
-#[cfg_attr(unix, path = "linux.rs")]
-#[cfg_attr(windows, path = "windows.rs")]
-mod sys;
-
-/// Larger images are rejected before any allocation.
+/// Larger images are rejected as soon as the header is read, before the pixels are collected.
 const MAX: u32 = 4096;
-/// Clips are decoded whole: 32M samples is about 6 minutes of 48 kHz stereo. Stream longer music instead.
+/// Clips are decoded whole: 32M samples is about 11 minutes at 48 kHz mono. Stream longer music instead.
 const MAX_SAMPLES: usize = 1 << 25;
+/// ffmpeg processes alive at once; the rest of the queue stays `Pending`.
+const MAX_RUNNING: usize = 4;
+/// Bytes read from one ffmpeg per `poll` at most, so a big asset cannot stall a frame.
+const READ_PER_POLL: usize = 1 << 20;
+const RATE: u32 = 48_000;
 
 pub struct Image {
     pub w: u32,
@@ -59,8 +65,6 @@ impl Grid {
     }
 }
 
-pub use sys::{jpeg, mp3, ogg, png, webp};
-
 /// Interleaved 16-bit PCM: frame `i` is `pcm[i * channels..][..channels]`.
 pub struct Clip {
     pub rate: u32,
@@ -68,151 +72,354 @@ pub struct Clip {
     pub pcm: Vec<i16>,
 }
 
-/// Appends little-endian s16 bytes; false once the clip would pass `MAX_SAMPLES`.
-fn push(pcm: &mut Vec<i16>, bytes: &[u8]) -> bool {
-    pcm.extend(
-        bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .map(|b| i16::from_le_bytes([b[0], b[1]])),
-    );
-    pcm.len() <= MAX_SAMPLES
+/// Where an asset is in its life. `Ready` stays `Ready` after `take`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Status {
+    Pending,
+    Loading,
+    Ready,
+    Failed(&'static CStr),
 }
 
-/// RIFF/WAVE with 16-bit PCM. Add 8/24-bit and float when an asset needs them.
-pub fn wav(file: &[u8]) -> Result<Clip, &'static CStr> {
-    let bad = AUDIO_DECODE_FAILED;
-    let [
-        b'R',
-        b'I',
-        b'F',
-        b'F',
-        _,
-        _,
-        _,
-        _,
-        b'W',
-        b'A',
-        b'V',
-        b'E',
-        rest @ ..,
-    ] = file
-    else {
-        return Err(bad);
-    };
-    let mut p = rest; // `mut p @ ..` would bind the unsized [u8] by value, not the &[u8]
-    let (mut rate, mut channels) = (0, 0);
-    while p.len() >= 8 {
-        let n = u32::from_le_bytes([p[4], p[5], p[6], p[7]]) as usize;
-        let Some(body) = p.get(8..8 + n) else {
-            return Err(bad); // truncated
+/// Ticket for a queued asset. Use it with the `Loader` that gave it out.
+#[derive(Clone, Copy)]
+pub struct Id(usize);
+
+enum Slot {
+    Pending,
+    /// `buf` is everything ffmpeg has written so far; `want` is the size it must reach (0 = not known yet).
+    Loading {
+        child: Child,
+        buf: Vec<u8>,
+        want: usize,
+    },
+    Image(Image),
+    Clip(Clip),
+    Taken,
+    Failed(&'static CStr),
+}
+
+struct Job {
+    path: Vec<u8>, // NUL-terminated
+    sound: bool,
+    slot: Slot,
+}
+
+#[derive(Default)]
+pub struct Loader(Vec<Job>);
+
+impl Loader {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Queue `name` from the assets directory as an image (any format ffmpeg reads; only the first frame).
+    pub fn image(&mut self, name: &str) -> Id {
+        self.queue(name, false)
+    }
+
+    /// Queue `name` from the assets directory as a sound (any format ffmpeg reads; a video's audio track works too).
+    pub fn sound(&mut self, name: &str) -> Id {
+        self.queue(name, true)
+    }
+
+    fn queue(&mut self, name: &str, sound: bool) -> Id {
+        self.0.push(Job {
+            path: platform::asset_path(name),
+            sound,
+            slot: Slot::Pending,
+        });
+        Id(self.0.len() - 1)
+    }
+
+    /// Call once per frame: starts pending assets while there is room, and collects what the running ones wrote.
+    pub fn poll(&mut self) {
+        let mut running = self
+            .0
+            .iter()
+            .filter(|j| matches!(j.slot, Slot::Loading { .. }))
+            .count();
+        for job in &mut self.0 {
+            if matches!(job.slot, Slot::Pending) && running < MAX_RUNNING {
+                job.start();
+                running += matches!(job.slot, Slot::Loading { .. }) as usize;
+            }
+            if matches!(job.slot, Slot::Loading { .. }) {
+                job.pump();
+            }
+        }
+    }
+
+    pub fn status(&self, id: Id) -> Status {
+        match self.0[id.0].slot {
+            Slot::Pending => Status::Pending,
+            Slot::Loading { .. } => Status::Loading,
+            Slot::Failed(e) => Status::Failed(e),
+            _ => Status::Ready,
+        }
+    }
+
+    /// Nothing is `Pending` or `Loading` any more (everything is `Ready` or `Failed`). True for an empty loader.
+    pub fn done(&self) -> bool {
+        self.0
+            .iter()
+            .all(|j| !matches!(j.slot, Slot::Pending | Slot::Loading { .. }))
+    }
+
+    /// First failure, if any asset failed.
+    pub fn failed(&self) -> Option<&'static CStr> {
+        self.0.iter().find_map(|j| match j.slot {
+            Slot::Failed(e) => Some(e),
+            _ => None,
+        })
+    }
+
+    /// 0..=1 over all queued assets: finished ones count fully, a running image counts by the pixels received so
+    /// far (a sound only counts once it is done: its length is not known up front). 1 for an empty loader.
+    pub fn progress(&self) -> f32 {
+        if self.0.is_empty() {
+            return 1.0;
+        }
+        let sum: f32 = self
+            .0
+            .iter()
+            .map(|j| match &j.slot {
+                Slot::Pending => 0.0,
+                Slot::Loading { buf, want, .. } if *want > 0 => {
+                    buf.len() as f32 / *want as f32 * 0.99
+                }
+                Slot::Loading { .. } => 0.0,
+                _ => 1.0,
+            })
+            .sum();
+        sum / self.0.len() as f32
+    }
+
+    /// The image, once it is `Ready`; it can be taken once. `None` for anything else, including a sound's id.
+    pub fn take_image(&mut self, id: Id) -> Option<Image> {
+        match core::mem::replace(&mut self.0[id.0].slot, Slot::Taken) {
+            Slot::Image(i) => Some(i),
+            other => {
+                self.0[id.0].slot = other;
+                None
+            }
+        }
+    }
+
+    /// The sound, once it is `Ready`; it can be taken once. `None` for anything else, including an image's id.
+    pub fn take_clip(&mut self, id: Id) -> Option<Clip> {
+        match core::mem::replace(&mut self.0[id.0].slot, Slot::Taken) {
+            Slot::Clip(c) => Some(c),
+            other => {
+                self.0[id.0].slot = other;
+                None
+            }
+        }
+    }
+
+    /// Blocks until everything is done. For tools and tests; a game polls from its frame loop instead.
+    pub fn wait(&mut self) {
+        while !self.done() {
+            self.poll();
+            platform::sleep_ms(1);
+        }
+    }
+}
+
+/// Blocking one-off: queue, wait, take. For programs with nothing to show while they load.
+pub fn load_image(name: &str) -> Result<Image, &'static CStr> {
+    let mut l = Loader::new();
+    let id = l.image(name);
+    l.wait();
+    l.take_image(id)
+        .ok_or(l.failed().unwrap_or(IMAGE_DECODE_FAILED))
+}
+
+impl Job {
+    fn start(&mut self) {
+        let Ok(path) = CStr::from_bytes_with_nul(&self.path) else {
+            self.slot = Slot::Failed(READ_FILE_FAILED); // a NUL inside the name
+            return;
         };
-        match &p[..4] {
-            b"fmt " if n >= 16 => {
-                let u16le = |o: usize| u16::from_le_bytes([body[o], body[o + 1]]);
-                // format tag 1 = PCM, 0xFFFE = extensible (the sub-format is not checked)
-                if !matches!(u16le(0), 1 | 0xFFFE) || u16le(14) != 16 || u16le(2) == 0 {
-                    return Err(bad);
+        let head = [c"ffmpeg", c"-nostdin", c"-v", c"error", c"-i", path];
+        let tail: &[&CStr] = if self.sound {
+            &[
+                c"-vn", c"-ac", c"1", c"-ar", c"48000", c"-f", c"s16le", c"-",
+            ]
+        } else {
+            &[
+                c"-frames:v",
+                c"1",
+                c"-an",
+                c"-pix_fmt",
+                c"rgba",
+                c"-c:v",
+                c"pam",
+                c"-f",
+                c"image2pipe",
+                c"-",
+            ]
+        };
+        let args: Vec<&CStr> = head.iter().chain(tail).copied().collect();
+        self.slot = match platform::spawn(&args) {
+            Some(child) => Slot::Loading {
+                child,
+                buf: Vec::new(),
+                want: 0,
+            },
+            None => Slot::Failed(FFMPEG_MISSING),
+        };
+    }
+
+    /// Read what ffmpeg has written (without blocking); finish the asset once its output ends.
+    fn pump(&mut self) {
+        let Slot::Loading { child, buf, want } = &mut self.slot else {
+            return;
+        };
+        let mut chunk = [0u8; 1 << 14];
+        let mut eof = false;
+        for _ in 0..READ_PER_POLL / chunk.len() {
+            match child.read(&mut chunk) {
+                Read::Data(n) => buf.extend_from_slice(&chunk[..n]),
+                Read::Empty => break,
+                Read::Eof => {
+                    eof = true;
+                    break;
                 }
-                channels = u16le(2) as u32;
-                rate = u32::from_le_bytes([body[4], body[5], body[6], body[7]]);
             }
-            b"data" => {
-                let mut pcm = Vec::with_capacity(body.len() / 2);
-                if rate == 0 || body.is_empty() || !push(&mut pcm, body) {
-                    return Err(bad);
-                }
-                return Ok(Clip {
-                    rate,
-                    channels,
-                    pcm,
-                });
+        }
+        let bad = if self.sound {
+            AUDIO_DECODE_FAILED
+        } else {
+            IMAGE_DECODE_FAILED
+        };
+        if !self.sound && *want == 0 {
+            match pam_header(buf) {
+                Ok(Some((hdr, w, h))) => *want = hdr + w as usize * h as usize * 4,
+                Ok(None) if !eof && buf.len() < 256 => {} // header not complete yet
+                _ => return self.slot = Slot::Failed(bad), // garbage, oversize, or no header at all
             }
+        }
+        if (self.sound && buf.len() / 2 > MAX_SAMPLES) || (*want > 0 && buf.len() > *want) {
+            return self.slot = Slot::Failed(bad);
+        }
+        if !eof {
+            return;
+        }
+        let ok = child.wait();
+        let buf = core::mem::take(buf);
+        self.slot = match (ok, self.sound) {
+            (true, true) if buf.len() >= 2 => Slot::Clip(Clip {
+                rate: RATE,
+                channels: 1,
+                pcm: buf
+                    .as_chunks::<2>()
+                    .0
+                    .iter()
+                    .map(|b| i16::from_le_bytes(*b))
+                    .collect(),
+            }),
+            (true, false) if buf.len() == *want => {
+                let (hdr, w, h) = pam_header(&buf).ok().flatten().unwrap();
+                let mut rgba = buf;
+                drop(rgba.drain(..hdr));
+                Slot::Image(Image { w, h, rgba })
+            }
+            _ => Slot::Failed(bad),
+        };
+    }
+}
+
+/// `Ok(Some((header bytes, w, h)))` once the whole PAM header is in `b`, `Ok(None)` while it is incomplete, `Err`
+/// for anything that is not RGBA PAM within `MAX`.
+fn pam_header(b: &[u8]) -> Result<Option<(usize, u32, u32)>, ()> {
+    const END: &[u8] = b"ENDHDR\n";
+    let Some(end) = b.windows(END.len()).position(|w| w == END) else {
+        return Ok(None);
+    };
+    let hdr = end + END.len();
+    let text = core::str::from_utf8(&b[..end]).map_err(|_| ())?;
+    let mut lines = text.lines();
+    if lines.next() != Some("P7") {
+        return Err(());
+    }
+    let (mut w, mut h, mut depth) = (0, 0, 0);
+    for l in lines {
+        let (key, v) = l.split_once(' ').ok_or(())?;
+        let v = v.parse::<u32>().unwrap_or(0);
+        match key {
+            "WIDTH" => w = v,
+            "HEIGHT" => h = v,
+            "DEPTH" => depth = v,
             _ => {}
         }
-        p = p.get(8 + n + (n & 1)..).unwrap_or(&[]); // chunks are padded to even sizes
     }
-    Err(bad)
+    if depth == 4 && (1..=MAX).contains(&w) && (1..=MAX).contains(&h) {
+        Ok(Some((hdr, w, h)))
+    } else {
+        Err(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     extern crate std;
     use super::*;
-    use errors::assets::{AUDIO_LIBRARY_MISSING, IMAGE_LIBRARY_MISSING};
-
-    type Img = fn(&[u8]) -> Result<Image, &'static CStr>;
-    type Snd = fn(&[u8]) -> Result<Clip, &'static CStr>;
-
-    const PNG: &[u8] = include_bytes!("../../../assets/walk.png");
-    const JPG: &[u8] = include_bytes!("../../../assets/walk.jpg");
-    const WEBP: &[u8] = include_bytes!("../../../assets/walk.webp");
-    const WAV: &[u8] = include_bytes!("../../../assets/blip.wav"); // 0.2 s sine, 22.05 kHz mono
-    const OGG: &[u8] = include_bytes!("../../../assets/blip.ogg"); // 0.2 s sine, 44.1 kHz stereo
-    const MP3: &[u8] = include_bytes!("../../../assets/blip.mp3"); // same
 
     #[test]
-    fn walk_sheet() {
-        let img = png(PNG).unwrap();
-        assert_eq!((img.w, img.h), (168, 24));
-        let g = Grid::new(&img, 24, 24);
+    fn loader_lifecycle() {
+        let mut l = Loader::new();
+        assert!(l.done() && l.progress() == 1.0);
+        let imgs = [
+            l.image("walk.png"),
+            l.image("walk.jpg"),
+            l.image("walk.webp"),
+        ];
+        let snds = [
+            l.sound("blip.wav"),
+            l.sound("blip.ogg"),
+            l.sound("blip.mp3"),
+        ];
+        let missing = l.image("nope.png");
+        let not_an_image = l.image("blip.wav");
+        assert!(l.status(missing) == Status::Pending && l.progress() == 0.0 && !l.done());
+
+        l.poll(); // 4 slots: the first four start, the rest wait their turn
+        assert!(l.status(imgs[0]) == Status::Loading && l.status(snds[1]) == Status::Pending);
+        assert!(l.status(not_an_image) == Status::Pending);
+
+        l.wait();
+        assert!(l.done() && l.progress() == 1.0);
+        assert!(l.status(missing) == Status::Failed(IMAGE_DECODE_FAILED));
+        assert!(l.status(not_an_image) == Status::Failed(IMAGE_DECODE_FAILED));
+
+        let png = l.take_image(imgs[0]).unwrap();
+        assert_eq!((png.w, png.h), (168, 24));
+        let g = Grid::new(&png, 24, 24);
         assert_eq!(g.cols, 7);
-        for i in 0..7 {
-            let opaque = (0..24 * 24)
-                .filter(|&k| g.px(&img, i, k % 24, k / 24)[3] != 0)
-                .count();
-            assert!(opaque > 20, "frame {i} is empty");
-        }
-    }
-
-    #[test]
-    fn jpeg_and_webp() {
-        let png = png(PNG).unwrap();
-        let jpg = jpeg(JPG).unwrap();
+        let jpg = l.take_image(imgs[1]).unwrap();
         assert_eq!((jpg.w, jpg.h), (168, 24));
         assert!(jpg.rgba.chunks(4).all(|p| p[3] == 255));
-        // the codec may legitimately be absent (no libwebp / no Store extension); if present it must agree with the PNG
-        match webp(WEBP) {
-            Ok(w) => {
-                assert_eq!((w.w, w.h), (png.w, png.h));
-                for (a, b) in w.rgba.chunks(4).zip(png.rgba.chunks(4)) {
-                    assert!(a[3] == b[3] && (b[3] == 0 || a == b)); // lossless; colour under alpha 0 is don't-care
-                }
-            }
-            Err(e) => assert!(e == IMAGE_LIBRARY_MISSING),
+        let webp = l.take_image(imgs[2]).unwrap(); // lossless: same pixels as the PNG
+        for (a, b) in webp.rgba.chunks(4).zip(png.rgba.chunks(4)) {
+            assert!(a[3] == b[3] && (b[3] == 0 || a == b));
         }
+        for id in snds {
+            let c = l.take_clip(id).unwrap();
+            assert_eq!((c.rate, c.channels), (48_000, 1));
+            assert!((8000..12000).contains(&c.pcm.len())); // 0.2 s = 9600; lossy codecs add or trim padding
+            assert!(c.pcm.iter().any(|s| s.abs() > 1000));
+        }
+        assert!(l.take_image(imgs[0]).is_none() && l.status(imgs[0]) == Status::Ready); // taken once
     }
 
     #[test]
-    fn sounds() {
-        let w = wav(WAV).unwrap();
-        assert_eq!((w.rate, w.channels, w.pcm.len()), (22050, 1, 4410));
-        assert!(w.pcm.iter().any(|s| s.abs() > 1000));
-        for (dec, file) in [(ogg as Snd, OGG), (mp3, MP3)] {
-            // lossy codecs add or trim a little padding; a missing codec is fine
-            match dec(file) {
-                Ok(c) => {
-                    assert_eq!((c.rate, c.channels), (44100, 2));
-                    assert!((8000..10500).contains(&(c.pcm.len() / 2)));
-                    assert!(c.pcm.iter().any(|s| s.abs() > 1000));
-                }
-                Err(e) => assert!(e == AUDIO_LIBRARY_MISSING),
-            }
-        }
-    }
-
-    #[test]
-    fn garbage_is_err() {
-        for (dec, file) in [(png as Img, PNG), (jpeg, JPG), (webp, WEBP)] {
-            assert!(dec(b"").is_err());
-            assert!(dec(&file[..4]).is_err());
-            assert!(dec(&file[..file.len() / 2]).is_err()); // truncated
-        }
-        for (dec, file) in [(wav as Snd, WAV), (ogg, OGG), (mp3, MP3)] {
-            assert!(dec(b"").is_err());
-            assert!(dec(&file[..4]).is_err());
-        }
-        assert!(wav(&WAV[..WAV.len() / 2]).is_err()); // an Ogg or MP3 stream just ends early, which is not an error
+    fn pam_header_cases() {
+        let ok = b"P7\nWIDTH 3\nHEIGHT 2\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n";
+        assert!(pam_header(ok) == Ok(Some((ok.len(), 3, 2))));
+        assert!(pam_header(&ok[..20]) == Ok(None));
+        assert!(pam_header(b"P7\nWIDTH 5000\nHEIGHT 2\nDEPTH 4\nENDHDR\n").is_err());
+        assert!(pam_header(b"P7\nWIDTH 3\nHEIGHT 2\nDEPTH 3\nENDHDR\n").is_err());
+        assert!(pam_header(b"nope\nENDHDR\n").is_err());
     }
 }

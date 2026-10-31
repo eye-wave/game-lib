@@ -33,14 +33,28 @@ fn rt_check() {}
 mod sys;
 pub use sys::*;
 
-/// Whole file from the assets directory, or `None`: `<workspace>/assets` in debug builds (found from the source
-/// tree, so any working directory does), `assets/` next to the executable in release builds (a bundle is the
-/// executables plus one `assets/` beside them).
-pub fn read_asset(name: &str) -> Option<Vec<u8>> {
+/// What a non-blocking `Child::read` found.
+pub enum Read {
+    Data(usize),
+    /// Nothing right now; the process is still running.
+    Empty,
+    /// The process closed its stdout: call `Child::wait`.
+    Eof,
+}
+
+/// NUL-terminated path of asset `name`: `<workspace>/assets` in debug builds (found from the source tree, so any
+/// working directory does), `assets/` next to the executable in release builds (a bundle is the executables plus
+/// one `assets/` beside them).
+pub fn asset_path(name: &str) -> Vec<u8> {
     let mut p = asset_dir();
     p.extend_from_slice(name.as_bytes());
     p.push(0);
-    read_file(CStr::from_bytes_with_nul(&p).ok()?)
+    p
+}
+
+/// Whole file from the assets directory, or `None`.
+pub fn read_asset(name: &str) -> Option<Vec<u8>> {
+    read_file(CStr::from_bytes_with_nul(&asset_path(name)).ok()?)
 }
 
 #[cfg(debug_assertions)]

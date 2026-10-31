@@ -480,3 +480,92 @@ pub fn read_file(path: &CStr) -> Option<Vec<u8>> {
         (got == n).then_some(v)
     }
 }
+
+unsafe extern "C" {
+    static environ: *const *mut c_char;
+}
+
+/// A running child process whose stdout is a non-blocking pipe. Dropping it kills the process if it is still running.
+pub struct Child {
+    fd: i32,
+    pid: i32, // 0 once reaped
+}
+
+/// Starts `args[0]` (looked up on PATH) with its stdout piped to the returned `Child`; stdin and stderr are
+/// inherited. `None` if it can't start (not installed).
+pub fn spawn(args: &[&CStr]) -> Option<Child> {
+    unsafe {
+        let mut fds = [0i32; 2];
+        if libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) != 0 {
+            return None;
+        }
+        let [r, w] = fds;
+        libc::fcntl(r, libc::F_SETFL, libc::O_NONBLOCK); // only our end: the child's writes must block
+        let mut fa = core::mem::MaybeUninit::<libc::posix_spawn_file_actions_t>::uninit();
+        libc::posix_spawn_file_actions_init(fa.as_mut_ptr());
+        libc::posix_spawn_file_actions_adddup2(fa.as_mut_ptr(), w, 1); // dup2 drops CLOEXEC on the copy
+        let mut argv: Vec<*mut c_char> = args.iter().map(|a| a.as_ptr() as *mut c_char).collect();
+        argv.push(ptr::null_mut());
+        let mut pid = 0;
+        let rc = libc::posix_spawnp(
+            &mut pid,
+            args[0].as_ptr(),
+            fa.as_ptr(),
+            ptr::null(),
+            argv.as_ptr(),
+            environ,
+        );
+        libc::posix_spawn_file_actions_destroy(fa.as_mut_ptr());
+        libc::close(w);
+        if rc != 0 {
+            libc::close(r);
+            return None;
+        }
+        Some(Child { fd: r, pid })
+    }
+}
+
+impl Child {
+    /// Never blocks.
+    pub fn read(&mut self, buf: &mut [u8]) -> Read {
+        let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
+        match n {
+            0 => Read::Eof,
+            1.. => Read::Data(n as usize),
+            _ => match unsafe { *libc::__errno_location() } {
+                libc::EAGAIN | libc::EINTR => Read::Empty,
+                _ => Read::Eof,
+            },
+        }
+    }
+
+    /// Call after `Read::Eof`: waits for the process and says whether it exited with code 0.
+    pub fn wait(&mut self) -> bool {
+        let mut st = 0;
+        let ok = unsafe { libc::waitpid(self.pid, &mut st, 0) } == self.pid
+            && libc::WIFEXITED(st)
+            && libc::WEXITSTATUS(st) == 0;
+        self.pid = 0;
+        ok
+    }
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.fd);
+            if self.pid != 0 {
+                libc::kill(self.pid, libc::SIGKILL);
+                libc::waitpid(self.pid, ptr::null_mut(), 0);
+            }
+        }
+    }
+}
+
+pub fn sleep_ms(ms: u32) {
+    let t = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: ms as i64 * 1_000_000,
+    };
+    unsafe { libc::nanosleep(&t, ptr::null_mut()) };
+}

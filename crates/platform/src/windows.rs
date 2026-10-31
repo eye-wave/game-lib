@@ -275,3 +275,146 @@ macro_rules! entry {
         }
     };
 }
+
+/// A running child process whose stdout is a pipe we only read when data is waiting. Dropping it kills the process
+/// if it is still running.
+pub struct Child {
+    pipe: isize,
+    process: isize, // 0 once waited for
+}
+
+/// Starts `args[0]` (looked up on PATH) with its stdout piped to the returned `Child`; stderr is inherited, no
+/// console window opens. `None` if it can't start (not installed). Arguments are quoted, with `"` escaped as `\"`.
+pub fn spawn(args: &[&CStr]) -> Option<Child> {
+    unsafe {
+        let mut cmd = Vec::new();
+        for a in args {
+            cmd.push(b'"');
+            for &c in a.to_bytes() {
+                if c == b'"' {
+                    cmd.push(b'\\');
+                }
+                cmd.push(c);
+            }
+            cmd.extend_from_slice(b"\" ");
+        }
+        cmd.push(0);
+        let sa = SecurityAttributes {
+            len: size_of::<SecurityAttributes>() as u32,
+            descriptor: ptr::null(),
+            inherit: 1,
+        };
+        let (mut r, mut w) = (0, 0);
+        if CreatePipe(&mut r, &mut w, &sa, 0) == 0 {
+            return None;
+        }
+        SetHandleInformation(r, HANDLE_FLAG_INHERIT, 0); // the child must not hold our end
+        let si = StartupInfo {
+            cb: size_of::<StartupInfo>() as u32,
+            reserved: ptr::null(),
+            desktop: ptr::null(),
+            title: ptr::null(),
+            geometry: [0; 7],
+            flags: STARTF_USESTDHANDLES,
+            show: 0,
+            reserved2_len: 0,
+            reserved2: ptr::null(),
+            std_in: 0,
+            std_out: w,
+            std_err: GetStdHandle(STD_ERROR_HANDLE),
+        };
+        let mut pi = ProcessInfo {
+            process: 0,
+            thread: 0,
+            pid: 0,
+            tid: 0,
+        };
+        let ok = CreateProcessA(
+            ptr::null(),
+            cmd.as_mut_ptr().cast(),
+            ptr::null(),
+            ptr::null(),
+            1,
+            CREATE_NO_WINDOW,
+            ptr::null(),
+            ptr::null(),
+            &si,
+            &mut pi,
+        );
+        CloseHandle(w);
+        if ok == 0 {
+            CloseHandle(r);
+            return None;
+        }
+        CloseHandle(pi.thread);
+        Some(Child {
+            pipe: r,
+            process: pi.process,
+        })
+    }
+}
+
+impl Child {
+    /// Never blocks.
+    pub fn read(&mut self, buf: &mut [u8]) -> Read {
+        unsafe {
+            let mut avail = 0u32;
+            // fails once the child has closed its end and the pipe is drained
+            if PeekNamedPipe(
+                self.pipe,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                &mut avail,
+                ptr::null_mut(),
+            ) == 0
+            {
+                return Read::Eof;
+            }
+            if avail == 0 {
+                return Read::Empty;
+            }
+            let mut got = 0u32;
+            let n = avail.min(buf.len() as u32);
+            if ReadFile(
+                self.pipe,
+                buf.as_mut_ptr().cast(),
+                n,
+                &mut got,
+                ptr::null_mut(),
+            ) == 0
+            {
+                return Read::Eof;
+            }
+            Read::Data(got as usize)
+        }
+    }
+
+    /// Call after `Read::Eof`: waits for the process and says whether it exited with code 0.
+    pub fn wait(&mut self) -> bool {
+        unsafe {
+            WaitForSingleObject(self.process, INFINITE);
+            let mut code = 1u32;
+            let ok = GetExitCodeProcess(self.process, &mut code) != 0 && code == 0;
+            CloseHandle(self.process);
+            self.process = 0;
+            ok
+        }
+    }
+}
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.pipe);
+            if self.process != 0 {
+                TerminateProcess(self.process, 1);
+                CloseHandle(self.process);
+            }
+        }
+    }
+}
+
+pub fn sleep_ms(ms: u32) {
+    unsafe { Sleep(ms) }
+}

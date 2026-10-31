@@ -214,8 +214,9 @@ pub const DEPTH2D: f32 = 100.0;
 
 /// Resource: the fullscreen post-processing shader (contract in `crates/gfx/src/post.wgsl`).
 /// `None` is a passthrough. It is built the first time it is seen, so set it any time before drawing.
+/// `.1` reaches the shader as `params.w` (a loading bar's progress, say); it may change every frame.
 #[derive(Clone, Copy, Default)]
-pub struct PostProcess(pub Option<&'static Align4<[u8]>>);
+pub struct PostProcess(pub Option<&'static Align4<[u8]>>, pub f32);
 
 /// Resource: whether the mouse is captured (default false). Insert `MouseCapture(true)` before `app.run(..)` to get
 /// FPS-style `mouse_delta` (hidden, confined, recentered pointer). Changing it while running is not supported.
@@ -1845,7 +1846,8 @@ unsafe fn run(mut app: App, title: &CStr) {
         );
         vkCmdSetViewport(cmd, 0, 1, &viewport);
         vkCmdSetScissor(cmd, 0, 1, &area);
-        let shader = world.resource::<PostProcess>().unwrap().0.unwrap_or(POST);
+        let PostProcess(custom, extra) = *world.resource::<PostProcess>().unwrap();
+        let shader = custom.unwrap_or(POST);
         // swapping the shader at runtime leaks the old pipeline.
         let post = match post_pipe {
             Some((s, p)) if ptr::eq(s, shader) => p,
@@ -1866,7 +1868,7 @@ unsafe fn run(mut app: App, title: &CStr) {
             0,
             ptr::null(),
         );
-        let params = [ew, eh, (now - start) as f32, 0.0];
+        let params = [ew, eh, (now - start) as f32, extra];
         vkCmdPushConstants(
             cmd,
             post_layout,

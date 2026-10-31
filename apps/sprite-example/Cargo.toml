@@ -6,7 +6,6 @@ edition = "2024"
 
 [dependencies]
 ecs = { path = "../../crates/ecs" }
-errors = { path = "../../crates/errors" }
 gfx = { path = "../../crates/gfx" }
 math = { path = "../../crates/math" }
 platform = { path = "../../crates/platform", features = ["rt"] }

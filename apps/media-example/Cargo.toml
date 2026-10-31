@@ -1,4 +1,3 @@
-
 [package]
 name = "media-example"
 version = "0.1.0"
@@ -7,11 +6,12 @@ edition = "2024"
 [dependencies]
 audio = { path = "../../crates/audio" }
 ecs = { path = "../../crates/ecs" }
-errors = { path = "../../crates/errors" }
 gfx = { path = "../../crates/gfx" }
 math = { path = "../../crates/math" }
 media = { path = "../../crates/media" }
 platform = { path = "../../crates/platform", features = ["rt"] }
+shader = { path = "../../crates/shader" }
 
 [build-dependencies]
+shader = { path = "../../crates/shader", features = ["build"] }
 win32-sys = { path = "../../crates/win32-sys", features = ["build"] }

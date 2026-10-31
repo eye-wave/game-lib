@@ -1,6 +1,6 @@
 // Default post-process: passthrough. A custom one (PostProcess resource) follows the same contract:
 //  - group 0: binding 0 = the rendered scene, binding 1 = a linear clamp sampler
-//  - immediate block: vec4 = (width, height, seconds, 0)
+//  - immediate block: vec4 = (width, height, seconds, PostProcess.1)
 //  - entry points vs_main (draws 3 vertices, no vertex buffers) and fs_main
 @group(0) @binding(0) var scene: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;

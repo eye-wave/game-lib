@@ -113,10 +113,9 @@ codes! {
     }
     assets {
         READ_FILE_FAILED = 701 => "",
-        IMAGE_DECODE_FAILED = 702 => "corrupt or truncated file",
-        IMAGE_LIBRARY_MISSING = 703 => "system decoder (libpng, libturbojpeg, libwebp, GDI+, Windows WebP extension) not installed or too old",
-        AUDIO_DECODE_FAILED = 704 => "corrupt file, or silent/empty",
-        AUDIO_LIBRARY_MISSING = 705 => "libvorbisfile, libmpg123 or Media Foundation (plus the Windows Vorbis extension for ogg) not installed",
+        IMAGE_DECODE_FAILED = 702 => "ffmpeg could not decode the image: missing, corrupt or truncated file, or larger than 4096 px",
+        FFMPEG_MISSING = 703 => "ffmpeg could not be started: it is not installed or not on PATH",
+        AUDIO_DECODE_FAILED = 704 => "ffmpeg could not decode the sound: missing or corrupt file, or silent/empty",
     }
     unknown {
         UNKNOWN_OR_UNCLASSIFIED_ERROR = 999 => ""

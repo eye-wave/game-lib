@@ -31,6 +31,43 @@ mod ffi {
         pub private: u32,
     }
 
+    #[repr(C)]
+    pub struct SecurityAttributes {
+        pub len: u32,
+        pub descriptor: *const c_void,
+        pub inherit: i32,
+    }
+
+    #[repr(C)]
+    pub struct StartupInfo {
+        pub cb: u32,
+        pub reserved: *const c_char,
+        pub desktop: *const c_char,
+        pub title: *const c_char,
+        pub geometry: [u32; 7], // x, y, width, height, count chars x/y, fill attribute
+        pub flags: u32,
+        pub show: u16,
+        pub reserved2_len: u16,
+        pub reserved2: *const u8,
+        pub std_in: isize,
+        pub std_out: isize,
+        pub std_err: isize,
+    }
+
+    #[repr(C)]
+    pub struct ProcessInfo {
+        pub process: isize,
+        pub thread: isize,
+        pub pid: u32,
+        pub tid: u32,
+    }
+
+    pub const STARTF_USESTDHANDLES: u32 = 0x100;
+    pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    pub const HANDLE_FLAG_INHERIT: u32 = 1;
+    pub const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    pub const INFINITE: u32 = u32::MAX;
+
     pub const WM_SIZE: u32 = 0x5;
     pub const WM_CLOSE: u32 = 0x10;
     pub const WM_KEYDOWN: u32 = 0x100;
@@ -73,6 +110,38 @@ mod ffi {
             overlapped: *mut c_void,
         ) -> i32;
         pub fn CloseHandle(h: isize) -> i32;
+        pub fn Sleep(ms: u32);
+        pub fn GetStdHandle(which: u32) -> isize;
+        pub fn CreatePipe(
+            read: *mut isize,
+            write: *mut isize,
+            sa: *const SecurityAttributes,
+            size: u32,
+        ) -> i32;
+        pub fn SetHandleInformation(h: isize, mask: u32, flags: u32) -> i32;
+        pub fn PeekNamedPipe(
+            h: isize,
+            buf: *mut c_void,
+            n: u32,
+            read: *mut u32,
+            avail: *mut u32,
+            left: *mut u32,
+        ) -> i32;
+        pub fn CreateProcessA(
+            app: *const c_char,
+            cmdline: *mut c_char,
+            process_sa: *const c_void,
+            thread_sa: *const c_void,
+            inherit: i32,
+            flags: u32,
+            env: *const c_void,
+            dir: *const c_char,
+            si: *const StartupInfo,
+            pi: *mut ProcessInfo,
+        ) -> i32;
+        pub fn WaitForSingleObject(h: isize, ms: u32) -> u32;
+        pub fn GetExitCodeProcess(h: isize, code: *mut u32) -> i32;
+        pub fn TerminateProcess(h: isize, code: u32) -> i32;
     }
 
     #[link(name = "user32", kind = "raw-dylib")]

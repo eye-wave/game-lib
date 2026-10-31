@@ -203,6 +203,7 @@ name = "media"
 version = "0.1.0"
 dependencies = [
  "errors",
+ "platform",
 ]
 
 [[package]]
@@ -211,11 +212,11 @@ version = "0.1.0"
 dependencies = [
  "audio",
  "ecs",
- "errors",
  "gfx",
  "math",
  "media",
  "platform",
+ "shader",
  "win32-sys",
 ]
 
@@ -371,7 +372,6 @@ name = "sprite-example"
 version = "0.1.0"
 dependencies = [
  "ecs",
- "errors",
  "gfx",
  "math",
  "media",

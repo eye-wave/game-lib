@@ -9,7 +9,6 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use ecs::{App, Entity, Schedule::*, World};
-use errors::prelude::*;
 use gfx::{Assets, Camera2d, Color, Input, Material, Mesh, RunExt, Transform};
 use math::Vec3;
 use media::{Grid, Image};
@@ -41,8 +40,7 @@ fn quad_mesh() -> Mesh {
 }
 
 fn setup(w: &mut World, _: f32) {
-    let bytes = platform::read_asset("walk.png").unwrap_or_else(|| die(READ_FILE_FAILED));
-    let img = media::png(&bytes).unwrap_or_else(|e| die(e));
+    let img = media::load_image("walk.png").unwrap_or_else(|e| die(e));
     let grid = Grid::new(&img, CELL, CELL);
 
     let quad = w.resource_mut::<Assets<Mesh>>().unwrap().add(quad_mesh());
