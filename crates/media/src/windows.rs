@@ -187,6 +187,46 @@ unsafe extern "system" {
 
 type A = Result<Clip, &'static CStr>;
 
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GetStdHandle(n: u32) -> *mut c_void;
+    fn WriteFile(h: *mut c_void, buf: *const u8, n: u32, written: *mut u32, ov: *mut c_void)
+    -> i32;
+    fn OutputDebugStringA(s: *const u8);
+}
+
+/// DEBUG: prints `tag 0xHHHHHHHH` to stdout and to the debugger (DebugView / VS output). Remove when done.
+fn dbg(tag: &str, v: u32) {
+    let mut b = [0u8; 96];
+    let mut n = 0;
+    for &c in tag.as_bytes().iter().take(80) {
+        b[n] = c;
+        n += 1;
+    }
+    for &c in b" 0x" {
+        b[n] = c;
+        n += 1;
+    }
+    for i in (0..8).rev() {
+        b[n] = b"0123456789ABCDEF"[(v >> (i * 4)) as usize & 15];
+        n += 1;
+    }
+    b[n] = b'\n';
+    n += 1;
+    unsafe {
+        let mut w = 0;
+        WriteFile(
+            GetStdHandle(0xFFFF_FFF5),
+            b.as_ptr(),
+            n as u32,
+            &mut w,
+            null_mut(),
+        ); // STD_OUTPUT_HANDLE
+        b[n] = 0;
+        OutputDebugStringA(b.as_ptr());
+    }
+}
+
 pub fn png(file: &[u8]) -> R {
     with_stream(file, IMAGE_DECODE_FAILED, gdi)
 }
@@ -375,7 +415,9 @@ type SetStr = unsafe extern "system" fn(*mut c_void, *const Guid, *const u16) ->
 unsafe fn mf(stream: *mut c_void, hint: Option<&str>) -> A {
     unsafe {
         with_com(|| {
-            if MFStartup(MF_VERSION, 0) < 0 {
+            let hr = MFStartup(MF_VERSION, 0);
+            if hr < 0 {
+                dbg("MFStartup failed", hr as u32);
                 return Err(AUDIO_LIBRARY_MISSING);
             }
             // byte stream, source reader, requested type, actual type: released below whatever happens
@@ -397,8 +439,9 @@ unsafe fn mf_read(stream: *mut c_void, hint: Option<&str>, objs: &mut [*mut c_vo
     unsafe {
         let bad = AUDIO_DECODE_FAILED;
         // no demuxer or decoder for this file = the codec/extension is not installed
-        let why = |hr: i32| {
+        let why = |at: &str, hr: i32| {
             let hr = hr as u32;
+            dbg(at, hr);
             if hr == MF_UNSUPPORTED_BYTESTREAM_TYPE || hr == MF_TOPO_CODEC_NOT_FOUND {
                 AUDIO_LIBRARY_MISSING
             } else {
@@ -411,17 +454,24 @@ unsafe fn mf_read(stream: *mut c_void, hint: Option<&str>, objs: &mut [*mut c_vo
         // hint the container so the Ogg byte-stream handler is picked (IMFAttributes slot 25 = SetString)
         if let Some(hint) = hint {
             let mut attrs = null_mut();
-            if com::<Qi>(objs[0], 0)(objs[0], &IID_ATTRIBUTES, &mut attrs) >= 0 {
+            let hr = com::<Qi>(objs[0], 0)(objs[0], &IID_ATTRIBUTES, &mut attrs);
+            dbg("QueryInterface(IMFAttributes)", hr as u32);
+            if hr >= 0 {
                 let mime: Vec<u16> = hint.encode_utf16().chain([0]).collect();
-                com::<SetStr>(attrs, 25)(attrs, &MF_BYTESTREAM_CONTENT_TYPE, mime.as_ptr());
+                let hr =
+                    com::<SetStr>(attrs, 25)(attrs, &MF_BYTESTREAM_CONTENT_TYPE, mime.as_ptr());
+                dbg("SetString(CONTENT_TYPE)", hr as u32);
                 let name: Vec<u16> = "file.ogg\0".encode_utf16().collect();
-                com::<SetStr>(attrs, 25)(attrs, &MF_BYTESTREAM_ORIGIN_NAME, name.as_ptr());
+                let hr = com::<SetStr>(attrs, 25)(attrs, &MF_BYTESTREAM_ORIGIN_NAME, name.as_ptr());
+                dbg("SetString(ORIGIN_NAME)", hr as u32);
                 release(attrs);
             }
+        } else {
+            dbg("no hint (mp3 path)", 0);
         }
         let hr = MFCreateSourceReaderFromByteStream(objs[0], null_mut(), &mut objs[1]);
         if hr < 0 {
-            return Err(why(hr));
+            return Err(why("MFCreateSourceReaderFromByteStream", hr));
         }
         if MFCreateMediaType(&mut objs[2]) < 0 {
             return Err(bad);
@@ -437,7 +487,7 @@ unsafe fn mf_read(stream: *mut c_void, hint: Option<&str>, objs: &mut [*mut c_vo
         // IMFSourceReader slots: 6 GetCurrentMediaType, 7 SetCurrentMediaType, 9 ReadSample
         let hr = com::<SetType>(reader, 7)(reader, MF_FIRST_AUDIO_STREAM, null_mut(), want);
         if hr < 0 {
-            return Err(why(hr));
+            return Err(why("SetCurrentMediaType(PCM)", hr));
         }
         if com::<GetType>(reader, 6)(reader, MF_FIRST_AUDIO_STREAM, &mut objs[3]) < 0 {
             return Err(bad);
