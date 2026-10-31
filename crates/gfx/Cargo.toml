@@ -17,7 +17,12 @@ vulkan-sys = { path = "../vulkan-sys" }
 shader = { path = "../shader", features = ["build"] }
 
 [features]
-default = ["cam2d"]
+default = ["cam2d", "multicam", "post", "mouse", "fixed_input", "lit"]
 cam2d = []
 cam3d = []
 cull = []
+multicam = []
+post = []
+mouse = []
+fixed_input = []
+lit = []
