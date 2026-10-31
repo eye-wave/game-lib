@@ -1,3 +1,4 @@
+
 [package]
 name = "example-3d"
 version = "0.1.0"
@@ -7,7 +8,7 @@ edition = "2024"
 ecs = { path = "../../crates/ecs" }
 gfx = { path = "../../crates/gfx" }
 math = { path = "../../crates/math" }
-platform = { path = "../../crates/platform" }
+platform = { path = "../../crates/platform", features = ["rt"] }
 shader = { path = "../../crates/shader" }
 
 [build-dependencies]

@@ -1,9 +1,10 @@
 
 [unstable]
 build-std = ["core", "alloc", "std"]
+panic-abort-tests = true
 
 [build]
-target = "x86_64-unknown-linux-gnu"
+target = "host-tuple"
 
 [target.x86_64-unknown-linux-gnu]
 rustflags = [

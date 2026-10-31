@@ -9,7 +9,7 @@ use win32_sys::*;
 
 pub const SURFACE_EXT: &CStr = khr::win32_surface::NAME;
 
-#[cfg(not(test))]
+#[cfg(all(feature = "rt", not(test)))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     unsafe { ExitProcess(3) }

@@ -1,3 +1,4 @@
+
 [package]
 name = "media-example"
 version = "0.1.0"
@@ -10,7 +11,7 @@ errors = { path = "../../crates/errors" }
 gfx = { path = "../../crates/gfx" }
 math = { path = "../../crates/math" }
 media = { path = "../../crates/media" }
-platform = { path = "../../crates/platform" }
+platform = { path = "../../crates/platform", features = ["rt"] }
 
 [build-dependencies]
 win32-sys = { path = "../../crates/win32-sys", features = ["build"] }

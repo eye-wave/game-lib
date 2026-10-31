@@ -15,3 +15,7 @@ libc = { version = "0.2", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 win32-sys = { path = "../win32-sys" }
+
+[features]
+# panic handler; only binaries enable it, lib tests link std which has its own
+rt = []

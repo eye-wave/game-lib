@@ -11,7 +11,7 @@ pub const SURFACE_EXT: &CStr = khr::xcb_surface::NAME;
 #[link(name = "c")]
 unsafe extern "C" {}
 
-#[cfg(not(test))]
+#[cfg(all(feature = "rt", not(test)))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     unsafe { libc::abort() }
