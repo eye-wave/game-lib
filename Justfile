@@ -34,7 +34,7 @@ app name:
     just build "{{name}}"
 
 generate-error-ref:
-    cargo run -p errors --features generate-error-docs -- target/bundle/error-table.html
+    RUSTFLAGS="-Cdebuginfo=0" cargo run -p errors --features generate-error-docs -- target/bundle/error-table.html
 
 bundle app="" dir="target/bundle":
     rm -rf target/bundle
