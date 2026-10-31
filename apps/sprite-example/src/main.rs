@@ -15,9 +15,9 @@ use math::Vec3;
 use media::{Grid, Image};
 use platform::{die, input::Space};
 
-const CELL: u32 = 24;
-const FRAMES: u32 = 7;
-const FPS: f32 = 12.0;
+const CELL: u32 = 32;
+const FRAMES: u32 = 16;
+const FPS: f32 = 24.0;
 
 struct Sprite {
     img: Image,
