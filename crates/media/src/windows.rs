@@ -109,6 +109,25 @@ const MF_TOPO_CODEC_NOT_FOUND: u32 = 0xC00D_5212;
 const WIC_COMPONENT_NOT_FOUND: u32 = 0x8898_2F50;
 const WIC_UNKNOWN_FORMAT: u32 = 0x8898_2F07;
 
+const MF_BYTESTREAM_ORIGIN_NAME: Guid = Guid(
+    0xfc358288,
+    0x3cb6,
+    0x460c,
+    [0xa4, 0x24, 0xb6, 0x68, 0x12, 0x60, 0x37, 0x5a],
+);
+const MF_BYTESTREAM_CONTENT_TYPE: Guid = Guid(
+    0xfc358289,
+    0x3cb6,
+    0x460c,
+    [0xa4, 0x24, 0xb6, 0x68, 0x12, 0x60, 0x37, 0x5a],
+);
+const IID_ATTRIBUTES: Guid = Guid(
+    0x2cd2d921,
+    0xc447,
+    0x44a7,
+    [0xa1, 0x3c, 0x4a, 0xda, 0xbf, 0xc2, 0x47, 0xe3],
+); // IID_IMFAttributes
+
 #[link(name = "gdiplus", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GdiplusStartup(token: *mut usize, input: *const Startup, output: *mut c_void) -> i32;
@@ -180,13 +199,21 @@ pub fn webp(file: &[u8]) -> R {
     with_stream(file, IMAGE_DECODE_FAILED, wic)
 }
 
-// Media Foundation sniffs the container itself, so `mp3` and `ogg` are the same call here.
+// Media Foundation sniffs MP3 by itself, but Ogg needs a content-type hint on the byte stream.
 pub fn mp3(file: &[u8]) -> A {
-    with_stream(file, AUDIO_DECODE_FAILED, mf)
+    with_stream(file, AUDIO_DECODE_FAILED, mf_mp3)
 }
 
 pub fn ogg(file: &[u8]) -> A {
-    with_stream(file, AUDIO_DECODE_FAILED, mf)
+    with_stream(file, AUDIO_DECODE_FAILED, mf_ogg)
+}
+
+unsafe fn mf_mp3(stream: *mut c_void) -> A {
+    unsafe { mf(stream, None) }
+}
+
+unsafe fn mf_ogg(stream: *mut c_void) -> A {
+    unsafe { mf(stream, Some("audio/ogg")) }
 }
 
 /// Puts the bytes in an IStream for the decoder. `fail` is the error if that stream cannot be made.
@@ -342,8 +369,10 @@ type ReadSample = unsafe extern "system" fn(
 ) -> i32;
 type Lock = unsafe extern "system" fn(*mut c_void, *mut *mut u8, *mut u32, *mut u32) -> i32;
 type Unlock = unsafe extern "system" fn(*mut c_void) -> i32;
+type Qi = unsafe extern "system" fn(*mut c_void, *const Guid, *mut *mut c_void) -> i32;
+type SetStr = unsafe extern "system" fn(*mut c_void, *const Guid, *const u16) -> i32;
 
-unsafe fn mf(stream: *mut c_void) -> A {
+unsafe fn mf(stream: *mut c_void, hint: Option<&str>) -> A {
     unsafe {
         with_com(|| {
             if MFStartup(MF_VERSION, 0) < 0 {
@@ -351,7 +380,7 @@ unsafe fn mf(stream: *mut c_void) -> A {
             }
             // byte stream, source reader, requested type, actual type: released below whatever happens
             let mut objs = [null_mut(); 4];
-            let out = mf_read(stream, &mut objs);
+            let out = mf_read(stream, hint, &mut objs);
             for o in objs {
                 if !o.is_null() {
                     release(o);
@@ -364,7 +393,7 @@ unsafe fn mf(stream: *mut c_void) -> A {
 }
 
 /// Source reader over the stream, asked for 16-bit PCM (it inserts the decoder), then read sample by sample.
-unsafe fn mf_read(stream: *mut c_void, objs: &mut [*mut c_void; 4]) -> A {
+unsafe fn mf_read(stream: *mut c_void, hint: Option<&str>, objs: &mut [*mut c_void; 4]) -> A {
     unsafe {
         let bad = AUDIO_DECODE_FAILED;
         // no demuxer or decoder for this file = the codec/extension is not installed
@@ -378,6 +407,17 @@ unsafe fn mf_read(stream: *mut c_void, objs: &mut [*mut c_void; 4]) -> A {
         };
         if MFCreateMFByteStreamOnStream(stream, &mut objs[0]) < 0 {
             return Err(bad);
+        }
+        // hint the container so the Ogg byte-stream handler is picked (IMFAttributes slot 25 = SetString)
+        if let Some(hint) = hint {
+            let mut attrs = null_mut();
+            if com::<Qi>(objs[0], 0)(objs[0], &IID_ATTRIBUTES, &mut attrs) >= 0 {
+                let mime: Vec<u16> = hint.encode_utf16().chain([0]).collect();
+                com::<SetStr>(attrs, 25)(attrs, &MF_BYTESTREAM_CONTENT_TYPE, mime.as_ptr());
+                let name: Vec<u16> = "file.ogg\0".encode_utf16().collect();
+                com::<SetStr>(attrs, 25)(attrs, &MF_BYTESTREAM_ORIGIN_NAME, name.as_ptr());
+                release(attrs);
+            }
         }
         let hr = MFCreateSourceReaderFromByteStream(objs[0], null_mut(), &mut objs[1]);
         if hr < 0 {
