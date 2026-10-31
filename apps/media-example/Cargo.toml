@@ -1,3 +1,4 @@
+
 [package]
 name = "media-example"
 version = "0.1.0"
@@ -6,7 +7,11 @@ edition = "2024"
 [dependencies]
 audio = { path = "../../crates/audio" }
 ecs = { path = "../../crates/ecs" }
-gfx = { path = "../../crates/gfx" }
+gfx = { path = "../../crates/gfx", default-features = false, features = [
+  "cam2d",
+  "mouse",
+  "post",
+] }
 math = { path = "../../crates/math" }
 media = { path = "../../crates/media" }
 platform = { path = "../../crates/platform", features = ["rt"] }

@@ -7,7 +7,9 @@ edition = "2024"
 [dependencies]
 audio = { path = "../../crates/audio" }
 ecs = { path = "../../crates/ecs" }
-gfx = { path = "../../crates/gfx" }
+gfx = { path = "../../crates/gfx", default-features = false, features = [
+  "cam2d",
+] }
 math = { path = "../../crates/math" }
 platform = { path = "../../crates/platform", features = ["rt"] }
 
