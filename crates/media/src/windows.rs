@@ -189,10 +189,32 @@ type A = Result<Clip, &'static CStr>;
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
-    fn GetStdHandle(n: u32) -> *mut c_void;
+    fn AttachConsole(pid: u32) -> i32;
+    fn CreateFileA(
+        name: *const u8,
+        access: u32,
+        share: u32,
+        sec: *const c_void,
+        disp: u32,
+        flags: u32,
+        template: *mut c_void,
+    ) -> *mut c_void;
     fn WriteFile(h: *mut c_void, buf: *const u8, n: u32, written: *mut u32, ov: *mut c_void)
     -> i32;
+    fn CloseHandle(h: *mut c_void) -> i32;
     fn OutputDebugStringA(s: *const u8);
+}
+
+/// DEBUG: opens `name`, writes `data`, closes it. Silently does nothing if the open fails.
+unsafe fn emit(name: &[u8], access: u32, share: u32, disp: u32, data: &[u8]) {
+    unsafe {
+        let h = CreateFileA(name.as_ptr(), access, share, null(), disp, 0, null_mut());
+        if !h.is_null() && h as usize != usize::MAX {
+            let mut w = 0;
+            WriteFile(h, data.as_ptr(), data.len() as u32, &mut w, null_mut());
+            CloseHandle(h);
+        }
+    }
 }
 
 /// DEBUG: prints `tag 0xHHHHHHHH` to stdout and to the debugger (DebugView / VS output). Remove when done.
@@ -214,14 +236,12 @@ fn dbg(tag: &str, v: u32) {
     b[n] = b'\n';
     n += 1;
     unsafe {
-        let mut w = 0;
-        WriteFile(
-            GetStdHandle(0xFFFF_FFF5),
-            b.as_ptr(),
-            n as u32,
-            &mut w,
-            null_mut(),
-        ); // STD_OUTPUT_HANDLE
+        // 1) the terminal that launched us (needed for GUI-subsystem exes; harmless if already attached)
+        AttachConsole(0xFFFF_FFFF); // ATTACH_PARENT_PROCESS
+        emit(b"CONOUT$\0", 0x4000_0000, 2, 3, &b[..n]); // GENERIC_WRITE, FILE_SHARE_WRITE, OPEN_EXISTING
+        // 2) debug.log in the current directory, appended to
+        emit(b"debug.log\0", 4, 3, 4, &b[..n]); // FILE_APPEND_DATA, SHARE_READ|WRITE, OPEN_ALWAYS
+        // 3) the debugger
         b[n] = 0;
         OutputDebugStringA(b.as_ptr());
     }
