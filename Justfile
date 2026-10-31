@@ -33,7 +33,11 @@ build app="example-3d":
 app name:
     just build "{{name}}"
 
+generate-error-ref:
+    cargo run -p errors --features generate-error-docs -- target/bundle/error-table.html
+
 bundle app="" dir="target/bundle":
+    rm -rf target/bundle
     mkdir -p "{{dir}}"
     for path in apps/*/; do \
         name="${path%/}"; name="${name##*/}"; \
@@ -41,7 +45,9 @@ bundle app="" dir="target/bundle":
         just build "$name"; \
         cp "target/{{target}}/release/$name{{exe}}" "{{dir}}/"; \
     done
+
     echo "Bundled apps:"
-    stat -c '%n %s' target/bundle/* | awk '{printf "%s %.2f KiB\n", $1, $2/1024}'
-    rm -rf target/bundle/assets
+    find target/bundle -maxdepth 1 -type f -printf '%s %p\n' | sort -nr | awk '{printf "%.2f KiB %s\n", $1/1024, $2}'
+
+    just generate-error-ref
     cp -r assets target/bundle/assets

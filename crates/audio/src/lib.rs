@@ -44,7 +44,7 @@ pub const BLIP: Sound = Sound {
 };
 
 /// A decoded clip: interleaved 16-bit PCM at its own rate, e.g. from `media::Clip` (`Vec::leak` its `pcm`, the
-/// audio thread needs it for good). Resampled to `RATE` by nearest frame and mixed down to mono like every voice.
+/// audio thread needs it for good). Resampled to `RATE` by linear interpolation and mixed down to mono like every voice.
 #[derive(Clone, Copy)]
 pub struct Sample {
     pub rate: u32,
@@ -53,12 +53,22 @@ pub struct Sample {
 }
 
 impl Sample {
-    /// Mono value at output frame `pos`, or `None` once the clip is over.
-    fn at(&self, pos: u32) -> Option<f32> {
+    /// Source frame `i` mixed down to mono, or `None` past the end.
+    fn mono(&self, i: usize) -> Option<f32> {
         let ch = (self.channels as usize).max(1);
-        let i = (pos as u64 * self.rate as u64 / RATE as u64) as usize * ch;
-        let frame = self.pcm.get(i..i + ch)?;
+        let frame = self.pcm.get(i * ch..i * ch + ch)?;
         Some(frame.iter().map(|&s| s as f32).sum::<f32>() / (ch as f32 * 32768.0))
+    }
+
+    /// Value at output frame `pos`, or `None` once the clip is over. Integer maths for the position, so it stays
+    /// exact however long the clip plays; the last frame is held for the half step after it.
+    fn at(&self, pos: u32) -> Option<f32> {
+        let num = pos as u64 * self.rate as u64;
+        let i = (num / RATE as u64) as usize;
+        let frac = (num % RATE as u64) as f32 / RATE as f32;
+        let a = self.mono(i)?;
+        let b = self.mono(i + 1).unwrap_or(a);
+        Some(a + (b - a) * frac)
     }
 }
 
@@ -322,6 +332,24 @@ mod tests {
         assert!(b[..2 * 200].iter().all(|&s| s == 16383));
         assert!(b[2 * 200..].iter().all(|&s| s == 0));
         assert!(m.voices.iter().all(|v| v.is_none()));
+    }
+
+    #[test]
+    fn sample_interpolates_between_frames() {
+        static PCM: [i16; 4] = [0, 16384, 0, 0]; // 24 kHz: every other output frame lands between two source frames
+        let mut m = Mixer::default();
+        m.play_sample(
+            Sample {
+                rate: 24_000,
+                channels: 1,
+                pcm: &PCM,
+            },
+            1.0,
+        );
+        let mut b = [0i16; 2 * 4];
+        m.mix(&mut b);
+        // frames 0..4 are 0, 0.25, 0.5, 0.25 of full scale (x 32767, truncated)
+        assert_eq!([b[0], b[2], b[4], b[6]], [0, 8191, 16383, 8191]);
     }
 
     #[test]
