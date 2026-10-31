@@ -36,6 +36,31 @@ static ALLOC: Heap = Heap;
 #[unsafe(no_mangle)]
 static _fltused: i32 = 0;
 
+// The CRT is dropped (/NODEFAULTLIB), so a >4KB stack frame (inlined under LTO) needs our own probe.
+// x86_64 only; add an aarch64 variant if you ever target it
+#[cfg(all(feature = "rt", not(test), target_arch = "x86_64"))]
+core::arch::global_asm!(
+    ".globl __chkstk",
+    "__chkstk:",
+    "push rcx",
+    "push rax",
+    "cmp rax, 0x1000",
+    "lea rcx, [rsp + 24]",
+    "jb 3f",
+    "2:",
+    "sub rcx, 0x1000",
+    "test [rcx], rcx",
+    "sub rax, 0x1000",
+    "cmp rax, 0x1000",
+    "ja 2b",
+    "3:",
+    "sub rcx, rax",
+    "test [rcx], rcx",
+    "pop rax",
+    "pop rcx",
+    "ret",
+);
+
 /// Cheap id of the calling thread.
 pub fn thread_id() -> usize {
     unsafe { GetCurrentThreadId() as usize }
