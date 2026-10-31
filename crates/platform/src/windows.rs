@@ -153,6 +153,36 @@ pub fn now() -> f64 {
     t as f64 / f as f64
 }
 
+/// Full path of the running executable (empty if unknown or too long).
+#[cfg(not(debug_assertions))]
+pub(crate) fn exe_path() -> Vec<u8> {
+    let mut b = vec![0u8; 1024];
+    let n = unsafe { GetModuleFileNameA(0, b.as_mut_ptr().cast(), b.len() as u32) } as usize;
+    b.truncate(if n == b.len() { 0 } else { n }); // a full buffer means the path was cut off
+    b
+}
+
+/// Whole file into memory, or `None` if it can't be opened or read (files over 4 GB are not supported).
+pub fn read_file(path: &CStr) -> Option<Vec<u8>> {
+    unsafe {
+        // GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING
+        let h = CreateFileA(path.as_ptr(), 0x8000_0000, 1, ptr::null(), 3, 0, 0);
+        if h == -1 {
+            return None;
+        }
+        let n = GetFileSize(h, ptr::null_mut());
+        if n == u32::MAX {
+            CloseHandle(h);
+            return None;
+        }
+        let mut v = vec![0u8; n as usize];
+        let mut got = 0u32;
+        let ok = ReadFile(h, v.as_mut_ptr().cast(), n, &mut got, ptr::null_mut());
+        CloseHandle(h);
+        (ok != 0 && got == n).then_some(v)
+    }
+}
+
 static CAPTURED: AtomicBool = AtomicBool::new(false);
 
 /// FPS-style mouse: while the window is in the foreground the cursor is hidden and confined to it, and every call
@@ -189,6 +219,18 @@ pub unsafe fn mouse_delta(w: &Window, cx: i32, cy: i32) -> [f32; 2] {
         SetCursorPos(c[0], c[1]);
     }
     [d[0] as f32, d[1] as f32]
+}
+
+/// The cursor in window pixels (x right, y down, may lie outside the window) and whether the left button is down.
+/// `None` while the window is in the background. Polled, so a click shorter than a frame is missed.
+pub unsafe fn pointer(w: &Window) -> Option<([f32; 2], bool)> {
+    if GetForegroundWindow() != w.hwnd {
+        return None;
+    }
+    let mut p = [0i32; 2];
+    GetCursorPos(&mut p);
+    ScreenToClient(w.hwnd, &mut p);
+    Some(([p[0] as f32, p[1] as f32], GetAsyncKeyState(0x01) < 0)) // VK_LBUTTON, high bit = down
 }
 
 /// Drain pending messages (sleeping while minimized); false means the user asked to quit. `keys` is kept up to date with the held keys.

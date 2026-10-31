@@ -199,6 +199,27 @@ name = "math"
 version = "0.1.0"
 
 [[package]]
+name = "media"
+version = "0.1.0"
+dependencies = [
+ "errors",
+]
+
+[[package]]
+name = "media-example"
+version = "0.1.0"
+dependencies = [
+ "audio",
+ "ecs",
+ "errors",
+ "gfx",
+ "math",
+ "media",
+ "platform",
+ "win32-sys",
+]
+
+[[package]]
 name = "naga"
 version = "30.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -343,6 +364,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9571ea910ebd84c86af4b3ed27f9dbdc6ad06f17c5f96146b2b671e2976744f"
 dependencies = [
  "bitflags",
+]
+
+[[package]]
+name = "sprite-example"
+version = "0.1.0"
+dependencies = [
+ "ecs",
+ "errors",
+ "gfx",
+ "math",
+ "media",
+ "platform",
+ "win32-sys",
 ]
 
 [[package]]

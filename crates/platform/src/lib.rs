@@ -2,6 +2,9 @@
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn, clippy::missing_safety_doc)]
 
+extern crate alloc;
+
+use alloc::{vec, vec::Vec};
 use ash::{khr, vk};
 use core::{ffi::CStr, ptr};
 use errors::prelude::*;
@@ -29,6 +32,33 @@ fn rt_check() {}
 #[cfg_attr(windows, path = "windows.rs")]
 mod sys;
 pub use sys::*;
+
+/// Whole file from the assets directory, or `None`: `<workspace>/assets` in debug builds (found from the source
+/// tree, so any working directory does), `assets/` next to the executable in release builds (a bundle is the
+/// executables plus one `assets/` beside them).
+pub fn read_asset(name: &str) -> Option<Vec<u8>> {
+    let mut p = asset_dir();
+    p.extend_from_slice(name.as_bytes());
+    p.push(0);
+    read_file(CStr::from_bytes_with_nul(&p).ok()?)
+}
+
+#[cfg(debug_assertions)]
+fn asset_dir() -> Vec<u8> {
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets/")
+        .as_bytes()
+        .to_vec()
+}
+
+#[cfg(not(debug_assertions))]
+fn asset_dir() -> Vec<u8> {
+    let mut p = exe_path();
+    while p.last().is_some_and(|&c| c != b'/' && c != b'\\') {
+        p.pop(); // keep the directory, with its separator; if the path is unknown, `assets/` is relative to the cwd
+    }
+    p.extend_from_slice(b"assets/"); // Windows takes '/' too
+    p
+}
 
 unsafe fn surface_ck(r: vk::Result, s: vk::SurfaceKHR) -> vk::SurfaceKHR {
     if r != vk::Result::SUCCESS {

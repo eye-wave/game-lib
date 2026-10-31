@@ -1,5 +1,5 @@
 //! Fatal-error codes: `die(errors::X)` shows only the short code, so no message text ends up in the binary.
-//! This file is the lookup table; 1xx setup, 2xx resources, 3xx rendering, 4xx linux, 5xx windows, 6xx engine.
+//! This file is the lookup table; 1xx setup, 2xx resources, 3xx rendering, 4xx linux, 5xx windows, 6xx engine, 7xx assets.
 #![no_std]
 
 /// `module { NAME = 101, ... }` -> `pub mod module { pub const NAME: &CStr = c"error101"; }`, plus a prelude.
@@ -79,7 +79,14 @@ codes! {
     game_engine {
         MATERIAL_ATTRIBUTE_FORMAT_UNSUPPORTED_ADD_ITS_SIZE_IN_MAKE_PIPELINE = 601,
         MATERIAL_HAS_MORE_THAN_4_VERTEX_ATTRIBUTES = 602,
-        ALLOC_IN_AUDIO_THREAD = 603, // debug builds only
+        ALLOC_IN_AUDIO_THREAD = 603,
+    }
+    assets {
+        READ_FILE_FAILED = 701,
+        IMAGE_DECODE_FAILED = 702, // corrupt or truncated file
+        IMAGE_LIBRARY_MISSING = 703, // system decoder (libpng, libturbojpeg, libwebp, GDI+, Windows WebP extension) not installed or too old
+        AUDIO_DECODE_FAILED = 704, // corrupt file, or silent/empty
+        AUDIO_LIBRARY_MISSING = 705, // libvorbisfile, libmpg123 or Media Foundation (plus the Windows Vorbis extension for ogg) not installed
     }
     unknown {
         UNKNOWN_OR_UNCLASSIFIED_ERROR = 999,

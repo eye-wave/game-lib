@@ -1,7 +1,7 @@
 //! Audio on its own thread. The game side only pushes commands into a lock-free queue; the thread owns the
 //! mixer and the device, and blocks in the device write (ALSA) or sleeps (winmm) to pace itself.
 //! `add(app)` once, then `world.resource_mut::<Audio>().unwrap().play(..)` / `.tone(..)`.
-//! Sounds are procedural (`fn(seconds) -> sample in -1..1`), mixed on the CPU into i16 stereo.
+//! Sounds are procedural (`fn(seconds) -> sample in -1..1`) or decoded clips (`Sample`), mixed on the CPU into i16 stereo.
 //! No audio device (container, no libasound)? No thread is started and everything silently no-ops.
 //! Debug builds: the audio thread aborts (`ALLOC_IN_AUDIO_THREAD`) if it ever touches the heap.
 #![no_std]
@@ -43,9 +43,46 @@ pub const BLIP: Sound = Sound {
     f: |t| (t * 880.0 * TAU).sin() * (1.0 - t / 0.15),
 };
 
+/// A decoded clip: interleaved 16-bit PCM at its own rate, e.g. from `media::Clip` (`Vec::leak` its `pcm`, the
+/// audio thread needs it for good). Resampled to `RATE` by nearest frame and mixed down to mono like every voice.
+#[derive(Clone, Copy)]
+pub struct Sample {
+    pub rate: u32,
+    pub channels: u32,
+    pub pcm: &'static [i16],
+}
+
+impl Sample {
+    /// Mono value at output frame `pos`, or `None` once the clip is over.
+    fn at(&self, pos: u32) -> Option<f32> {
+        let ch = (self.channels as usize).max(1);
+        let i = (pos as u64 * self.rate as u64 / RATE as u64) as usize * ch;
+        let frame = self.pcm.get(i..i + ch)?;
+        Some(frame.iter().map(|&s| s as f32).sum::<f32>() / (ch as f32 * 32768.0))
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Src {
+    Synth(Sound),
+    Pcm(Sample),
+}
+
+impl Src {
+    /// Value at output frame `pos`, or `None` once the sound is over.
+    fn at(&self, pos: u32) -> Option<f32> {
+        match *self {
+            Src::Synth(s) => (pos as f32)
+                .lt(&(s.secs * RATE as f32))
+                .then(|| (s.f)(pos as f32 / RATE as f32)),
+            Src::Pcm(s) => s.at(pos),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Voice {
-    s: Sound,
+    src: Src,
     pos: u32,
     vol: f32,
 }
@@ -67,10 +104,18 @@ pub struct Mixer {
 
 impl Mixer {
     // all voices busy => new sound is dropped; add stealing if that is audible.
-    fn play(&mut self, s: Sound, vol: f32) {
+    fn start(&mut self, src: Src, vol: f32) {
         if let Some(v) = self.voices.iter_mut().find(|v| v.is_none()) {
-            *v = Some(Voice { s, pos: 0, vol });
+            *v = Some(Voice { src, pos: 0, vol });
         }
+    }
+
+    fn play(&mut self, s: Sound, vol: f32) {
+        self.start(Src::Synth(s), vol);
+    }
+
+    fn play_sample(&mut self, s: Sample, vol: f32) {
+        self.start(Src::Pcm(s), vol);
     }
 
     fn tone(&mut self, slot: usize, freq: f32, on: bool) {
@@ -83,6 +128,7 @@ impl Mixer {
     fn apply(&mut self, c: Cmd) {
         match c {
             Cmd::Play(s, vol) => self.play(s, vol),
+            Cmd::Sample(s, vol) => self.play_sample(s, vol),
             Cmd::Tone(slot, freq, on) => self.tone(slot as usize, freq, on),
         }
     }
@@ -93,10 +139,12 @@ impl Mixer {
             let mut sum = 0.0;
             for slot in &mut self.voices {
                 let Some(v) = slot else { continue };
-                sum += (v.s.f)(v.pos as f32 / RATE as f32) * v.vol;
-                v.pos += 1;
-                if v.pos as f32 >= v.s.secs * RATE as f32 {
-                    *slot = None;
+                match v.src.at(v.pos) {
+                    Some(x) => {
+                        sum += x * v.vol;
+                        v.pos += 1;
+                    }
+                    None => *slot = None,
                 }
             }
             for o in &mut self.oscs {
@@ -122,6 +170,7 @@ impl Mixer {
 #[derive(Clone, Copy)]
 enum Cmd {
     Play(Sound, f32),
+    Sample(Sample, f32),
     Tone(u8, f32, bool),
 }
 
@@ -212,6 +261,13 @@ impl Audio {
         }
     }
 
+    /// Play a decoded clip once. Same drop rules as `play`.
+    pub fn play_sample(&mut self, s: Sample, vol: f32) {
+        if let Some(q) = self.q {
+            q.push(Cmd::Sample(s, vol));
+        }
+    }
+
     /// Start/stop the sine oscillator in `slot` (< OSCS) at `freq` Hz. Cheap to call every frame.
     pub fn tone(&mut self, slot: usize, freq: f32, on: bool) {
         let Some(q) = self.q else { return };
@@ -247,6 +303,25 @@ mod tests {
         assert!(m.voices.iter().all(|v| v.is_none()));
         m.mix(&mut b);
         assert!(b.iter().all(|&s| s == 0)); // overwritten with silence
+    }
+
+    #[test]
+    fn sample_is_resampled_then_frees() {
+        static PCM: [i16; 100] = [16384; 100]; // 24 kHz mono: 200 output frames at 0.5
+        let mut m = Mixer::default();
+        m.play_sample(
+            Sample {
+                rate: 24_000,
+                channels: 1,
+                pcm: &PCM,
+            },
+            1.0,
+        );
+        let mut b = [1i16; 2 * 300];
+        m.mix(&mut b);
+        assert!(b[..2 * 200].iter().all(|&s| s == 16383));
+        assert!(b[2 * 200..].iter().all(|&s| s == 0));
+        assert!(m.voices.iter().all(|v| v.is_none()));
     }
 
     #[test]

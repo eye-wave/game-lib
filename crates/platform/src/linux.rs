@@ -353,6 +353,24 @@ pub unsafe fn mouse_delta(w: &Window, cx: i32, cy: i32) -> [f32; 2] {
     [d[0] as f32, d[1] as f32]
 }
 
+/// The pointer in window pixels (x right, y down, may lie outside the window) and whether the left button is down.
+/// `None` while the window is not focused. Polled, so a click shorter than a frame is missed.
+pub unsafe fn pointer(w: &Window) -> Option<([f32; 2], bool)> {
+    if !w.focused.get() {
+        return None;
+    }
+    let r = xcb_query_pointer_reply(w.conn, xcb_query_pointer(w.conn, w.win), ptr::null_mut());
+    if r.is_null() {
+        return None;
+    }
+    let out = (
+        [(*r).win_x as f32, (*r).win_y as f32],
+        (*r).mask & 0x100 != 0,
+    );
+    libc::free(r as *mut c_void);
+    Some(out)
+}
+
 /// Drain pending events; false means the user asked to quit. `keys` is kept up to date with the held keys.
 pub unsafe fn poll(w: &Window, resized: &mut bool, keys: &mut input::Keys) -> bool {
     let mut running = true;
@@ -429,4 +447,36 @@ macro_rules! entry {
             0
         }
     };
+}
+
+/// Full path of the running executable (empty if unknown).
+#[cfg(not(debug_assertions))]
+pub(crate) fn exe_path() -> Vec<u8> {
+    let mut b = vec![0u8; 4096];
+    let n = unsafe { libc::readlink(c"/proc/self/exe".as_ptr(), b.as_mut_ptr().cast(), b.len()) };
+    b.truncate(n.max(0) as usize);
+    b
+}
+
+/// Whole file into memory, or `None` if it can't be opened or read.
+pub fn read_file(path: &CStr) -> Option<Vec<u8>> {
+    unsafe {
+        let fd = libc::open(path.as_ptr(), libc::O_RDONLY);
+        if fd < 0 {
+            return None;
+        }
+        let n = libc::lseek(fd, 0, libc::SEEK_END).max(0) as usize;
+        libc::lseek(fd, 0, libc::SEEK_SET);
+        let mut v = vec![0u8; n];
+        let mut got = 0;
+        while got < n {
+            let r = libc::read(fd, v[got..].as_mut_ptr().cast(), n - got);
+            if r <= 0 {
+                break;
+            }
+            got += r as usize;
+        }
+        libc::close(fd);
+        (got == n).then_some(v)
+    }
 }

@@ -43,3 +43,4 @@ bundle app="" dir="target/bundle":
     done
     echo "Bundled apps:"
     stat -c '%n %s' target/bundle/* | awk '{printf "%s %.2f KiB\n", $1, $2/1024}'
+    cp -r assets target/bundle/assets

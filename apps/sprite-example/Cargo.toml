@@ -1,0 +1,15 @@
+[package]
+name = "sprite-example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ecs = { path = "../../crates/ecs" }
+errors = { path = "../../crates/errors" }
+gfx = { path = "../../crates/gfx" }
+math = { path = "../../crates/math" }
+platform = { path = "../../crates/platform" }
+media = { path = "../../crates/media" }
+
+[build-dependencies]
+win32-sys = { path = "../../crates/win32-sys", features = ["build"] }

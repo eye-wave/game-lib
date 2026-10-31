@@ -50,19 +50,8 @@ jobs:
       - name: Build bundle
         run: just bundle
 
-      - name: Archive bundle (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          cd target
-          zip -r bundle-${{ matrix.target }}.zip bundle
-
-      - name: Archive bundle (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Compress-Archive -Path target/bundle/* -DestinationPath target/bundle-${{ matrix.target }}.zip
-
       - uses: actions/upload-artifact@v5
         with:
           name: bundle-${{ matrix.target }}
-          path: target/bundle-${{ matrix.target }}.zip
+          path: target/bundle
+          if-no-files-found: error

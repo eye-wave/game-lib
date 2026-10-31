@@ -54,6 +54,25 @@ mod ffi {
         pub fn GetCurrentThreadId() -> u32;
         pub fn QueryPerformanceCounter(c: *mut i64) -> i32;
         pub fn QueryPerformanceFrequency(f: *mut i64) -> i32;
+        pub fn CreateFileA(
+            name: *const c_char,
+            access: u32,
+            share: u32,
+            security: *const c_void,
+            disposition: u32,
+            flags: u32,
+            template: isize,
+        ) -> isize;
+        pub fn GetFileSize(h: isize, high: *mut u32) -> u32;
+        pub fn GetModuleFileNameA(module: isize, buf: *mut c_char, size: u32) -> u32;
+        pub fn ReadFile(
+            h: isize,
+            buf: *mut c_void,
+            n: u32,
+            read: *mut u32,
+            overlapped: *mut c_void,
+        ) -> i32;
+        pub fn CloseHandle(h: isize) -> i32;
     }
 
     #[link(name = "user32", kind = "raw-dylib")]
@@ -61,6 +80,8 @@ mod ffi {
         pub fn ClientToScreen(h: isize, p: *mut [i32; 2]) -> i32;
         pub fn SetCursorPos(x: i32, y: i32) -> i32;
         pub fn GetCursorPos(p: *mut [i32; 2]) -> i32;
+        pub fn ScreenToClient(h: isize, p: *mut [i32; 2]) -> i32;
+        pub fn GetAsyncKeyState(vk: i32) -> i16;
         pub fn GetClientRect(h: isize, r: *mut [i32; 4]) -> i32;
         pub fn ClipCursor(r: *const [i32; 4]) -> i32;
         pub fn ShowCursor(show: i32) -> i32;

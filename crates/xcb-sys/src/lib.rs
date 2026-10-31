@@ -92,6 +92,7 @@ pub struct QueryPointerReply {
     pub root_y: i16,
     pub win_x: i16, // relative to the queried window
     pub win_y: i16,
+    pub mask: u16, // held buttons and modifiers; 0x100 = button 1 (left)
 }
 #[repr(C)]
 pub struct ClientMsg {

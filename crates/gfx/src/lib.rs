@@ -227,12 +227,18 @@ pub struct MouseCapture(pub bool);
 /// ends inside one frame is not lost: it is both `just_pressed` and `just_released`.
 /// Fixed systems should read `FixedInput` instead: this one only changes once per frame, so a fixed step could see
 /// the same press several times, or none.
-/// The mouse is captured (hidden, confined, recentered) while the window has focus, so it only reports motion
-/// (`mouse_delta`), like an FPS.
+/// Without `MouseCapture` the pointer is free: `cursor`, `cursor_world`, `mouse_down` and `clicked` work, and
+/// `mouse_delta` is 0. With it the mouse is captured (hidden, confined, recentered) while the window has focus,
+/// so it only reports motion (`mouse_delta`), like an FPS, and the pointer methods report nothing.
+/// Only `Input` has the pointer methods, not `FixedInput`.
 #[derive(Clone, Copy, Default)]
 pub struct Input {
     view: PlatformView,
     delta: [f32; 2],
+    cursor: Option<[f32; 2]>, // window pixels, y down
+    size: [f32; 2],           // window size in pixels
+    down: bool,               // left button held
+    clicked: bool,            // left button went down this frame
 }
 impl Deref for Input {
     type Target = PlatformView;
@@ -244,6 +250,43 @@ impl Input {
     /// Mouse motion since the last frame (x right, y down): raw device units on Linux with XInput2, else pixels.
     pub fn mouse_delta(&self) -> [f32; 2] {
         self.delta
+    }
+
+    /// Pointer in window pixels (x right, y down), or `None` while the window is unfocused or the mouse is captured.
+    pub fn cursor(&self) -> Option<[f32; 2]> {
+        self.cursor
+    }
+
+    /// The left button is held (wherever the pointer is).
+    pub fn mouse_down(&self) -> bool {
+        self.down
+    }
+
+    /// The left button went down this frame. Sampled once per frame, so a press and release inside one frame is missed.
+    pub fn clicked(&self) -> bool {
+        self.clicked
+    }
+
+    /// The pointer in `cam`'s world (x right, y up), or `None` if it is outside the window or the camera's viewport.
+    pub fn cursor_world(&self, cam: &Camera2d) -> Option<Vec2> {
+        let [cx, cy] = self.cursor?;
+        let [ew, eh] = self.size;
+        let [vx, vy, vw, vh] = cam.viewport;
+        let u = (cx / ew - vx) / vw; // 0..1 across the viewport, left to right
+        let v = ((1.0 - cy / eh) - vy) / vh; // 0..1 up the viewport, bottom to top
+        if !(0.0..=1.0).contains(&u) || !(0.0..=1.0).contains(&v) {
+            return None;
+        }
+        let aspect = vw * ew / (vh * eh);
+        let (x, y) = (
+            (2.0 * u - 1.0) * cam.height * aspect / 2.0,
+            (2.0 * v - 1.0) * cam.height / 2.0,
+        );
+        let (s, c) = (cam.rotation.sin(), cam.rotation.cos()); // view -> world is the inverse of view_proj_2d
+        Some(Vec2::new(
+            cam.pos.x + c * x - s * y,
+            cam.pos.y + s * x + c * y,
+        ))
     }
 }
 
@@ -1280,6 +1323,7 @@ unsafe fn run(mut app: App, title: &CStr) {
     let mut shown = false;
     let mut frame = 0usize;
     let mut keys = Keys::default();
+    let mut was_down = false;
     let (mut gpu_meshes, mut pipes): (Vec<Option<GpuMesh>>, Vec<Option<vk::Pipeline>>) =
         (Vec::new(), Vec::new());
     let mut cam_targets: [Option<CamTarget>; MAX_CAMERAS] = core::array::from_fn(|_| None);
@@ -1296,16 +1340,28 @@ unsafe fn run(mut app: App, title: &CStr) {
         let dt = (now - last) as f32;
         last = now;
         let c = center(sc.extent);
-        let delta = if app.world.resource::<MouseCapture>().unwrap().0 {
+        let captured = app.world.resource::<MouseCapture>().unwrap().0;
+        let delta = if captured {
             platform::mouse_delta(&w, c[0], c[1])
         } else {
             [0.0; 2]
         };
+        let pointer = if captured {
+            None
+        } else {
+            platform::pointer(&w)
+        };
+        let down = pointer.is_some_and(|p| p.1);
         let changes = keys.take_changes();
         *app.world.resource_mut::<Input>().unwrap() = Input {
             view: PlatformView::frame(keys.held(), &changes),
             delta,
+            cursor: pointer.map(|p| p.0),
+            size: [sc.extent.width as f32, sc.extent.height as f32],
+            down,
+            clicked: down && !was_down,
         };
+        was_down = down;
         app.world
             .resource_mut::<FixedInput>()
             .unwrap()
