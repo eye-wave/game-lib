@@ -6,7 +6,10 @@ edition = "2024"
 
 [dependencies]
 ecs = { path = "../../crates/ecs" }
-gfx = { path = "../../crates/gfx" }
+gfx = { path = "../../crates/gfx", default-features = false, features = [
+  "cam3d",
+  "cull",
+] }
 math = { path = "../../crates/math" }
 platform = { path = "../../crates/platform", features = ["rt"] }
 shader = { path = "../../crates/shader" }

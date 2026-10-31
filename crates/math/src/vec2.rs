@@ -1,5 +1,6 @@
 use core::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
+#[allow(unused)]
 use crate::{Vec3, sys::FloatExt};
 
 vec_impl!(Vec2, 2, x, y);

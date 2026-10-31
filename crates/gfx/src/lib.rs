@@ -20,13 +20,18 @@ use core::{
 };
 use ecs::{App, Schedule};
 use errors::prelude::*;
-use math::{FloatExt, Vec2, Vec3};
+#[cfg(feature = "cam2d")]
+use math::Vec2;
+use math::{FloatExt, Vec3};
 use platform::{
     die,
     input::{Keys, MAX_KEYS, Pending, View as PlatformView},
 };
 use shader::{Align4, words};
 use vulkan_sys::*;
+
+#[cfg(not(any(feature = "cam2d", feature = "cam3d")))]
+compile_error!("enable at least one of the features `cam2d` and `cam3d`");
 
 // ---------------------------------------------------------------- game-facing API
 
@@ -91,6 +96,7 @@ pub struct Material {
 impl Material {
     /// Built in, for 2D shapes: the mesh is plain `Vec3` positions, filled with the entity's `Color` (white if it has
     /// none). `Transform.yaw` rotates about z instead of y and `scale.z` is ignored. Pairs with `Camera2d`.
+    #[cfg(feature = "cam2d")]
     pub fn flat() -> Self {
         Self {
             shader: FLAT,
@@ -152,6 +158,7 @@ pub struct Color(pub [f32; 3]);
 /// cameras draw over earlier ones. The target is `scale` times the viewport's pixel size: below 1 it renders at a
 /// lower resolution and is upscaled with nearest filtering (big pixels), above 1 it is supersampled. With no
 /// active camera a default one is used.
+#[cfg(feature = "cam3d")]
 #[derive(Clone, Copy)]
 pub struct Camera3d {
     pub pos: Vec3,
@@ -165,6 +172,7 @@ pub struct Camera3d {
     pub scale: f32,
     pub active: bool,
 }
+#[cfg(feature = "cam3d")]
 impl Default for Camera3d {
     fn default() -> Self {
         Self {
@@ -186,6 +194,7 @@ impl Default for Camera3d {
 /// and drawing order work as for `Camera3d`. `height` is how many world units fit top to bottom (the width follows the window's aspect ratio).
 /// `rotation` turns the view counterclockwise, in radians. A `Transform`'s z is its layer: higher z draws in front,
 /// within +-`DEPTH2D`. Spawn one before `app.run(..)` to skip the default `Camera3d`.
+#[cfg(feature = "cam2d")]
 #[derive(Clone, Copy)]
 pub struct Camera2d {
     pub pos: Vec2,
@@ -196,6 +205,7 @@ pub struct Camera2d {
     pub scale: f32,
     pub active: bool,
 }
+#[cfg(feature = "cam2d")]
 impl Default for Camera2d {
     fn default() -> Self {
         Self {
@@ -210,6 +220,7 @@ impl Default for Camera2d {
     }
 }
 /// Layers of a `Camera2d` scene span z in [-DEPTH2D, DEPTH2D].
+#[cfg(feature = "cam2d")]
 pub const DEPTH2D: f32 = 100.0;
 
 /// Resource: the fullscreen post-processing shader (contract in `crates/gfx/src/post.wgsl`).
@@ -237,7 +248,8 @@ pub struct Input {
     view: PlatformView,
     delta: [f32; 2],
     cursor: Option<[f32; 2]>, // window pixels, y down
-    size: [f32; 2],           // window size in pixels
+    #[cfg(feature = "cam2d")]
+    size: [f32; 2], // window size in pixels, for `cursor_world`
     down: bool,               // left button held
     clicked: bool,            // left button went down this frame
 }
@@ -269,6 +281,7 @@ impl Input {
     }
 
     /// The pointer in `cam`'s world (x right, y up), or `None` if it is outside the window or the camera's viewport.
+    #[cfg(feature = "cam2d")]
     pub fn cursor_world(&self, cam: &Camera2d) -> Option<Vec2> {
         let [cx, cy] = self.cursor?;
         let [ew, eh] = self.size;
@@ -600,9 +613,7 @@ unsafe fn destroy_swapchain(c: &Ctx, sc: &Swapchain) {
         vkDestroyImageView(c.device, v, NA);
     }
     for t in [&sc.scene, &sc.depth] {
-        vkDestroyImageView(c.device, t.view, NA);
-        vkDestroyImage(c.device, t.image, NA);
-        vkFreeMemory(c.device, t.mem, NA);
+        destroy_target(c, t);
     }
     vkDestroySwapchainKHR(c.device, sc.handle, NA);
 }
@@ -644,7 +655,9 @@ const CAP: usize = 4096; // instances per group; must match cull.wgsl
 pub const MAX_CAMERAS: usize = 4;
 const SCENE_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM; // offscreen color, sampled by the post pass
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+#[cfg(feature = "cull")]
 static CULL: &Align4<[u8]> = shader::include_shader!("cull");
+#[cfg(feature = "cam2d")]
 static FLAT: &Align4<[u8]> = shader::include_shader!("flat");
 static POST: &Align4<[u8]> = shader::include_shader!("post");
 
@@ -657,6 +670,7 @@ struct Inst {
     color: [f32; 4], // tint rgb, mesh bounding radius squared
 }
 
+#[cfg(feature = "cull")]
 #[repr(C)]
 struct CullPc {
     vp: [f32; 16],
@@ -687,6 +701,7 @@ unsafe fn destroy_target(c: &Ctx, t: &Target) {
 }
 
 /// View * projection, column-major, depth range 0..1 (see `Camera3d` for the conventions).
+#[cfg(feature = "cam3d")]
 fn view_proj(c: &Camera3d, aspect: f32) -> [f32; 16] {
     let (sy, cy, sp, cp) = (c.yaw.sin(), (c.yaw).cos(), (c.pitch).sin(), (c.pitch).cos());
     let f = [-sy * cp, sp, -cy * cp]; // forward
@@ -708,6 +723,7 @@ fn view_proj(c: &Camera3d, aspect: f32) -> [f32; 16] {
 }
 
 /// Orthographic view * projection for `Camera2d`, same conventions as `view_proj`: depth 0..1, higher z nearer.
+#[cfg(feature = "cam2d")]
 fn view_proj_2d(c: &Camera2d, aspect: f32) -> [f32; 16] {
     let (s, co) = (c.rotation.sin(), c.rotation.cos());
     let (sy, sx) = (2.0 / c.height, 2.0 / (c.height * aspect));
@@ -728,9 +744,11 @@ struct Buf {
 
 /// Buffers one in-flight frame owns (the CPU rewrites them while the other frame is on the GPU).
 struct Frame {
-    input: Buf,   // every drawable, written by the CPU
+    input: Buf, // every drawable, written by the CPU
+    #[cfg(feature = "cull")]
     visible: Buf, // survivors of culling, per group slice (device-local, GPU only)
-    draws: Buf,   // one VkDrawIndirectCommand per group; the culling shader fills in instanceCount
+    draws: Buf, // one VkDrawIndirectCommand per group; the culling shader fills in instanceCount
+    #[cfg(feature = "cull")]
     set: vk::DescriptorSet,
 }
 
@@ -1013,10 +1031,20 @@ unsafe fn run(mut app: App, title: &CStr) {
     if app.world.resource::<MouseCapture>().is_none() {
         app.world.insert_resource(MouseCapture(false));
     }
-    if app.world.query_of::<(Camera2d,)>().is_empty()
-        && app.world.query_of::<(Camera3d,)>().is_empty()
+    let mut has_camera = false;
+    #[cfg(feature = "cam2d")]
     {
+        has_camera |= !app.world.query_of::<(Camera2d,)>().is_empty();
+    }
+    #[cfg(feature = "cam3d")]
+    {
+        has_camera |= !app.world.query_of::<(Camera3d,)>().is_empty();
+    }
+    if !has_camera {
+        #[cfg(feature = "cam3d")]
         app.world.spawn_with((Camera3d::default(),));
+        #[cfg(not(feature = "cam3d"))]
+        app.world.spawn_with((Camera2d::default(),));
     }
     app.world.insert_resource(PostProcess::default());
 
@@ -1100,61 +1128,63 @@ unsafe fn run(mut app: App, title: &CStr) {
     });
 
     // culling: 3 storage buffers (input, visible, draws) + view/count as push constants
-    let set_binds: [vk::DescriptorSetLayoutBinding; 3] = core::array::from_fn(|i| {
-        vk::DescriptorSetLayoutBinding::default()
-            .binding(i as u32)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)
+    #[cfg(feature = "cull")]
+    let (set_layout, cull_layout, cull_pipe) = {
+        let set_binds: [vk::DescriptorSetLayoutBinding; 3] = core::array::from_fn(|i| {
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(i as u32)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+        });
+        let set_layout: vk::DescriptorSetLayout = mk(CREATE_DESCRIPTOR_SET_LAYOUT_FAILED, |p| {
+            vkCreateDescriptorSetLayout(
+                device,
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_binds),
+                NA,
+                p,
+            )
+        });
+        let cull_push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::COMPUTE)
-    });
-    let set_layout: vk::DescriptorSetLayout = mk(CREATE_DESCRIPTOR_SET_LAYOUT_FAILED, |p| {
-        vkCreateDescriptorSetLayout(
-            device,
-            &vk::DescriptorSetLayoutCreateInfo::default().bindings(&set_binds),
-            NA,
-            p,
-        )
-    });
-    let cull_push = [vk::PushConstantRange::default()
-        .stage_flags(vk::ShaderStageFlags::COMPUTE)
-        .size(size_of::<CullPc>() as u32)];
-    let set_layouts = [set_layout];
-    let cull_layout: vk::PipelineLayout = mk(CREATE_PIPELINE_LAYOUT_FAILED, |p| {
-        vkCreatePipelineLayout(
-            device,
-            &vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(&set_layouts)
-                .push_constant_ranges(&cull_push),
-            NA,
-            p,
-        )
-    });
-    let cull_module = shader_module(device, CULL);
-    let mut cull_pipe = vk::Pipeline::default();
-    ck(
-        vkCreateComputePipelines(
-            device,
-            vk::PipelineCache::null(),
-            1,
-            &vk::ComputePipelineCreateInfo::default()
-                .stage(
-                    vk::PipelineShaderStageCreateInfo::default()
-                        .stage(vk::ShaderStageFlags::COMPUTE)
-                        .module(cull_module)
-                        .name(c"cull"),
-                )
-                .layout(cull_layout),
-            NA,
-            &mut cull_pipe,
-        ),
-        CREATE_COMPUTE_PIPELINES_FAILED,
-    );
-    vkDestroyShaderModule(device, cull_module, NA);
+            .size(size_of::<CullPc>() as u32)];
+        let set_layouts = [set_layout];
+        let cull_layout: vk::PipelineLayout = mk(CREATE_PIPELINE_LAYOUT_FAILED, |p| {
+            vkCreatePipelineLayout(
+                device,
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(&set_layouts)
+                    .push_constant_ranges(&cull_push),
+                NA,
+                p,
+            )
+        });
+        let cull_module = shader_module(device, CULL);
+        let mut cull_pipe = vk::Pipeline::default();
+        ck(
+            vkCreateComputePipelines(
+                device,
+                vk::PipelineCache::null(),
+                1,
+                &vk::ComputePipelineCreateInfo::default()
+                    .stage(
+                        vk::PipelineShaderStageCreateInfo::default()
+                            .stage(vk::ShaderStageFlags::COMPUTE)
+                            .module(cull_module)
+                            .name(c"cull"),
+                    )
+                    .layout(cull_layout),
+                NA,
+                &mut cull_pipe,
+            ),
+            CREATE_COMPUTE_PIPELINES_FAILED,
+        );
+        vkDestroyShaderModule(device, cull_module, NA);
+        (set_layout, cull_layout, cull_pipe)
+    };
 
-    let pool_sizes = [
-        vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(3 * FRAMES as u32),
+    #[allow(unused_mut)]
+    let mut pool_sizes = alloc::vec![
         vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::SAMPLED_IMAGE)
             .descriptor_count(1),
@@ -1162,32 +1192,54 @@ unsafe fn run(mut app: App, title: &CStr) {
             .ty(vk::DescriptorType::SAMPLER)
             .descriptor_count(1),
     ];
+    #[cfg(feature = "cull")]
+    pool_sizes.push(
+        vk::DescriptorPoolSize::default()
+            .ty(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(3 * FRAMES as u32),
+    );
     let dpool: vk::DescriptorPool = mk(CREATE_DESCRIPTOR_POOL_FAILED, |p| {
         vkCreateDescriptorPool(
             device,
             &vk::DescriptorPoolCreateInfo::default()
-                .max_sets(FRAMES as u32 + 1)
+                .max_sets(if cfg!(feature = "cull") {
+                    FRAMES as u32 + 1
+                } else {
+                    1
+                })
                 .pool_sizes(&pool_sizes),
             NA,
             p,
         )
     });
-    let all_layouts = [set_layout; FRAMES];
-    let mut sets = [vk::DescriptorSet::default(); FRAMES];
-    ck(
-        vkAllocateDescriptorSets(
-            device,
-            &vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(dpool)
-                .set_layouts(&all_layouts),
-            sets.as_mut_ptr(),
-        ),
-        ALLOCATE_DESCRIPTOR_SETS_FAILED,
-    );
+    #[cfg(feature = "cull")]
+    let sets = {
+        let all_layouts = [set_layout; FRAMES];
+        let mut sets = [vk::DescriptorSet::default(); FRAMES];
+        ck(
+            vkAllocateDescriptorSets(
+                device,
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(dpool)
+                    .set_layouts(&all_layouts),
+                sets.as_mut_ptr(),
+            ),
+            ALLOCATE_DESCRIPTOR_SETS_FAILED,
+        );
+        sets
+    };
     let frames: [Frame; FRAMES] = core::array::from_fn(|f| {
+        let _ = f;
         let storage = vk::BufferUsageFlags::STORAGE_BUFFER;
         let inst_bytes = (GROUPS * CAP * size_of::<Inst>()) as u64;
-        let input = make_buffer(&ctx, inst_bytes, storage, true);
+        // the input buffer is also drawn from directly when culling is off
+        let input = make_buffer(
+            &ctx,
+            inst_bytes,
+            storage | vk::BufferUsageFlags::VERTEX_BUFFER,
+            true,
+        );
+        #[cfg(feature = "cull")]
         let visible = make_buffer(
             &ctx,
             inst_bytes * MAX_CAMERAS as u64,
@@ -1200,23 +1252,28 @@ unsafe fn run(mut app: App, title: &CStr) {
             storage | vk::BufferUsageFlags::INDIRECT_BUFFER,
             true,
         );
-        let infos = [input.buf, visible.buf, draws.buf].map(|b| {
-            [vk::DescriptorBufferInfo::default()
-                .buffer(b)
-                .range(vk::WHOLE_SIZE)]
-        });
-        let writes: [vk::WriteDescriptorSet; 3] = core::array::from_fn(|i| {
-            vk::WriteDescriptorSet::default()
-                .dst_set(sets[f])
-                .dst_binding(i as u32)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&infos[i])
-        });
-        vkUpdateDescriptorSets(device, 3, writes.as_ptr(), 0, ptr::null());
+        #[cfg(feature = "cull")]
+        {
+            let infos = [input.buf, visible.buf, draws.buf].map(|b| {
+                [vk::DescriptorBufferInfo::default()
+                    .buffer(b)
+                    .range(vk::WHOLE_SIZE)]
+            });
+            let writes: [vk::WriteDescriptorSet; 3] = core::array::from_fn(|i| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(sets[f])
+                    .dst_binding(i as u32)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&infos[i])
+            });
+            vkUpdateDescriptorSets(device, 3, writes.as_ptr(), 0, ptr::null());
+        }
         Frame {
             input,
+            #[cfg(feature = "cull")]
             visible,
             draws,
+            #[cfg(feature = "cull")]
             set: sets[f],
         }
     });
@@ -1358,6 +1415,7 @@ unsafe fn run(mut app: App, title: &CStr) {
             view: PlatformView::frame(keys.held(), &changes),
             delta,
             cursor: pointer.map(|p| p.0),
+            #[cfg(feature = "cam2d")]
             size: [sc.extent.width as f32, sc.extent.height as f32],
             down,
             clicked: down && !was_down,
@@ -1426,40 +1484,55 @@ unsafe fn run(mut app: App, title: &CStr) {
         let mats = world.resource::<Assets<Material>>().unwrap();
         let (ew, eh) = (sc.extent.width as f32, sc.extent.height as f32);
 
+        // 2D cameras first, then 3D; with none active a default 3D camera is used
         let aspect = |r: [f32; 4]| (r[2] * ew) / (r[3] * eh);
         let mut views: Vec<View> = Vec::new();
+        fn add(v: &mut Vec<View>, vp: [f32; 16], sky: [f32; 3], rect: [f32; 4], scale: f32) {
+            if rect[2] > 0.0 && rect[3] > 0.0 {
+                v.push(View {
+                    vp,
+                    sky,
+                    rect,
+                    scale,
+                });
+            }
+        }
+        #[cfg(feature = "cam2d")]
         for e in world.query_of::<(Camera2d,)>() {
             let c = world.get::<Camera2d>(e).unwrap();
-            if c.active && c.viewport[2] > 0.0 && c.viewport[3] > 0.0 {
-                views.push(View {
-                    vp: view_proj_2d(c, aspect(c.viewport)),
-                    sky: c.sky,
-                    rect: c.viewport,
-                    scale: c.scale,
-                });
+            if c.active {
+                let vp = view_proj_2d(c, aspect(c.viewport));
+                add(&mut views, vp, c.sky, c.viewport, c.scale);
             }
         }
+        #[cfg(feature = "cam3d")]
         for e in world.query_of::<(Camera3d,)>() {
             let c = world.get::<Camera3d>(e).unwrap();
-            if c.active && c.viewport[2] > 0.0 && c.viewport[3] > 0.0 {
-                views.push(View {
-                    vp: view_proj(c, aspect(c.viewport)),
-                    sky: c.sky,
-                    rect: c.viewport,
-                    scale: c.scale,
-                });
+            if c.active {
+                let vp = view_proj(c, aspect(c.viewport));
+                add(&mut views, vp, c.sky, c.viewport, c.scale);
             }
         }
-        views.truncate(MAX_CAMERAS);
         if views.is_empty() {
-            let c = Camera3d::default();
-            views.push(View {
-                vp: view_proj(&c, aspect(c.viewport)),
-                sky: c.sky,
-                rect: c.viewport,
-                scale: c.scale,
-            });
+            #[cfg(feature = "cam3d")]
+            let (vp, c) = {
+                let c = Camera3d::default();
+                (
+                    view_proj(&c, aspect(c.viewport)),
+                    (c.sky, c.viewport, c.scale),
+                )
+            };
+            #[cfg(not(feature = "cam3d"))]
+            let (vp, c) = {
+                let c = Camera2d::default();
+                (
+                    view_proj_2d(&c, aspect(c.viewport)),
+                    (c.sky, c.viewport, c.scale),
+                )
+            };
+            add(&mut views, vp, c.0, c.1, c.2);
         }
+        views.truncate(MAX_CAMERAS);
 
         let mut groups: Vec<(usize, usize)> = Vec::new(); // (mesh, material) per group
         let mut counts = [0usize; GROUPS];
@@ -1479,9 +1552,15 @@ unsafe fn run(mut app: App, title: &CStr) {
                 continue; // extra instances are dropped; raise CAP (and cull.wgsl's)
             }
             counts[g] += 1;
+            // culling reads one packed list; without it each group needs its own contiguous slice
+            let dst = if cfg!(feature = "cull") {
+                n
+            } else {
+                g * CAP + counts[g] - 1
+            };
             let t = world.get::<Transform>(e).unwrap();
             let c = world.get::<Color>(e).map_or([1.0; 3], |c| c.0);
-            fr.input.ptr.cast::<Inst>().add(n).write(Inst {
+            fr.input.ptr.cast::<Inst>().add(dst).write(Inst {
                 a: [t.pos.x, t.pos.y, t.pos.z, t.yaw],
                 s: [t.scale.x, t.scale.y, t.scale.z, g as f32],
                 color: [c[0], c[1], c[2], meshes.0[mi].radius2],
@@ -1499,55 +1578,71 @@ unsafe fn run(mut app: App, title: &CStr) {
                     .ptr
                     .cast::<[u32; 4]>()
                     .add(k * GROUPS + g)
-                    .write([m.count, 0, 0, 0]);
+                    // instanceCount: the culling shader counts survivors; without it, all of them draw
+                    .write([
+                        m.count,
+                        if cfg!(feature = "cull") {
+                            0
+                        } else {
+                            counts[g] as u32
+                        },
+                        0,
+                        0,
+                    ]);
             }
         }
-        if n > 0 {
-            vkCmdBindPipeline(cmd, vk::PipelineBindPoint::COMPUTE, cull_pipe);
-            vkCmdBindDescriptorSets(
-                cmd,
-                vk::PipelineBindPoint::COMPUTE,
-                cull_layout,
-                0,
-                1,
-                &fr.set,
-                0,
-                ptr::null(),
-            );
-            for (k, v) in views.iter().enumerate() {
-                let pc = CullPc {
-                    vp: v.vp,
-                    count: n as u32,
-                    cam: k as u32,
-                    _pad: [0; 2],
-                };
-                vkCmdPushConstants(
+        #[cfg(not(feature = "cull"))]
+        let _ = n;
+        #[cfg(feature = "cull")]
+        {
+            if n > 0 {
+                vkCmdBindPipeline(cmd, vk::PipelineBindPoint::COMPUTE, cull_pipe);
+                vkCmdBindDescriptorSets(
                     cmd,
+                    vk::PipelineBindPoint::COMPUTE,
                     cull_layout,
-                    vk::ShaderStageFlags::COMPUTE,
                     0,
-                    size_of::<CullPc>() as u32,
-                    ptr::from_ref(&pc).cast(),
+                    1,
+                    &fr.set,
+                    0,
+                    ptr::null(),
                 );
-                vkCmdDispatch(cmd, (n as u32).div_ceil(64), 1, 1);
+                for (k, v) in views.iter().enumerate() {
+                    let pc = CullPc {
+                        vp: v.vp,
+                        count: n as u32,
+                        cam: k as u32,
+                        _pad: [0; 2],
+                    };
+                    vkCmdPushConstants(
+                        cmd,
+                        cull_layout,
+                        vk::ShaderStageFlags::COMPUTE,
+                        0,
+                        size_of::<CullPc>() as u32,
+                        ptr::from_ref(&pc).cast(),
+                    );
+                    vkCmdDispatch(cmd, (n as u32).div_ceil(64), 1, 1);
+                }
+                let barrier = [vk::MemoryBarrier::default()
+                    .src_access_mask(vk::AccessFlags::SHADER_WRITE)
+                    .dst_access_mask(
+                        vk::AccessFlags::INDIRECT_COMMAND_READ
+                            | vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
+                    )];
+                vkCmdPipelineBarrier(
+                    cmd,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                    vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::VERTEX_INPUT,
+                    vk::DependencyFlags::empty(),
+                    1,
+                    barrier.as_ptr(),
+                    0,
+                    ptr::null(),
+                    0,
+                    ptr::null(),
+                );
             }
-            let barrier = [vk::MemoryBarrier::default()
-                .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-                .dst_access_mask(
-                    vk::AccessFlags::INDIRECT_COMMAND_READ | vk::AccessFlags::VERTEX_ATTRIBUTE_READ,
-                )];
-            vkCmdPipelineBarrier(
-                cmd,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::PipelineStageFlags::DRAW_INDIRECT | vk::PipelineStageFlags::VERTEX_INPUT,
-                vk::DependencyFlags::empty(),
-                1,
-                barrier.as_ptr(),
-                0,
-                ptr::null(),
-                0,
-                ptr::null(),
-            );
         }
 
         // ---- the scene image is only copied into: clear it, then each camera renders to its own target and is
@@ -1715,8 +1810,12 @@ unsafe fn run(mut app: App, title: &CStr) {
                     size_of::<[f32; 16]>() as u32,
                     v.vp.as_ptr().cast(),
                 );
-                let bufs = [m.buf, fr.visible.buf];
-                let offs = [0, (slice * CAP * size_of::<Inst>()) as u64];
+                #[cfg(feature = "cull")]
+                let (inst_buf, inst_off) = (fr.visible.buf, slice * CAP * size_of::<Inst>());
+                #[cfg(not(feature = "cull"))]
+                let (inst_buf, inst_off) = (fr.input.buf, g * CAP * size_of::<Inst>());
+                let bufs = [m.buf, inst_buf];
+                let offs = [0, inst_off as u64];
                 vkCmdBindVertexBuffers(cmd, 0, 2, bufs.as_ptr(), offs.as_ptr());
                 vkCmdDrawIndirect(
                     cmd,

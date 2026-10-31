@@ -15,3 +15,9 @@ vulkan-sys = { path = "../vulkan-sys" }
 
 [build-dependencies]
 shader = { path = "../shader", features = ["build"] }
+
+[features]
+default = ["cam2d"]
+cam2d = []
+cam3d = []
+cull = []
