@@ -13,9 +13,12 @@ ttf-parser = { version = "0.18", optional = true }
 flate2 = { version = "1", optional = true } # .woff (what @fontsource ships)
 serde_json = { version = "1", optional = true } # only for `bitmap`
 
+[target.'cfg(windows)'.dependencies]
+msdfgen-sys = { version = "0.2.1", features = ["bindgen"], optional = true }
+
 [features]
 # `font::build(..)` for a build.rs; turns std on
-build = ["dep:msdfgen", "dep:ttf-parser", "dep:flate2"]
+build = ["dep:msdfgen", "dep:msdfgen-sys", "dep:ttf-parser", "dep:flate2"]
 # bitmap fonts instead of MSDF: `font::build(..)` converts BMFont-style JSON, nothing else is compiled or linked.
 # Exclusive with `build`; turns std on
 bitmap = ["dep:serde_json"]
