@@ -1,11 +1,53 @@
 //! Feature `build`: font file -> atlas blob (layout in lib.rs), for a build.rs.
-use msdfgen::{Bitmap, FontExt, MsdfGeneratorConfig, Range, Rgb};
 use std::{collections::BTreeSet, env, fs, io::Read, path::Path};
-use ttf_parser::Face;
+use ttf_parser::{Face, OutlineBuilder};
 
-/// Distance field range in atlas px. Text is drawn with a hard 0.5 threshold, so it only has to be wide enough
-/// for the corner-preserving trick to work; 4 is msdfgen's usual.
+/// Distance field range in atlas px (total, so half of it is free around the glyph in its cell). Text is drawn with a
+/// hard 0.5 threshold, so it only has to be wide enough for the corner-preserving trick to work; 4 is msdfgen's usual.
 const RANGE: f64 = 4.0;
+
+// msdf/shim.cpp over the msdfgen submodule: outline commands (0 move, 1 line, 2 quad, 3 cubic, 4 close; points in
+// `pts`) -> `cell` x `cell` x 3 floats, top row first, and the cell's quad in font units. 0 ok, 1 no outline, 2 invalid.
+unsafe extern "C" {
+    fn msdf_glyph(
+        ops: *const u8,
+        n_ops: usize,
+        pts: *const f64,
+        cell: u32,
+        range_px: f64,
+        out: *mut f32,
+        quad: *mut f64,
+    ) -> i32;
+}
+
+#[derive(Default)]
+struct Outline {
+    ops: Vec<u8>,
+    pts: Vec<f64>,
+}
+impl Outline {
+    fn add(&mut self, op: u8, p: &[f32]) {
+        self.ops.push(op);
+        self.pts.extend(p.iter().map(|&v| v as f64));
+    }
+}
+impl OutlineBuilder for Outline {
+    fn move_to(&mut self, x: f32, y: f32) {
+        self.add(0, &[x, y])
+    }
+    fn line_to(&mut self, x: f32, y: f32) {
+        self.add(1, &[x, y])
+    }
+    fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+        self.add(2, &[x1, y1, x, y])
+    }
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+        self.add(3, &[x1, y1, x2, y2, x, y])
+    }
+    fn close(&mut self) {
+        self.add(4, &[])
+    }
+}
 
 /// For build.rs: bake `chars` (a space is always added) of the .ttf, .otf or .woff at `src` into
 /// `$OUT_DIR/<file stem>.font`, `cell` x `cell` px per glyph (32 is plenty for UI text, raise it for big titles).
@@ -15,6 +57,10 @@ pub fn build(src: &str, chars: &str, cell: u32) {
     let data = sfnt(fs::read(src).unwrap());
     let face = Face::parse(&data, 0).unwrap();
     let em = face.units_per_em() as f64;
+    assert!(
+        cell as f64 > RANGE,
+        "glyph cell too small for the distance range, raise `cell`"
+    );
 
     let set: BTreeSet<char> = chars.chars().chain([' ']).collect();
     let glyphs: Vec<_> = set
@@ -32,41 +78,38 @@ pub fn build(src: &str, chars: &str, cell: u32) {
         let advance = face.glyph_hor_advance(id).unwrap_or(0) as f64 / em;
         let (mut quad, mut uv) = ([0.0f64; 4], [0.0f64; 4]);
         // no outline (a space) -> advance only
-        if let Some(mut shape) = face.glyph_shape(id) {
-            let b = shape.get_bound();
-            let frame = b
-                .autoframe(cell, cell, Range::Px(RANGE), None)
-                .expect("glyph cell too small for the distance range, raise `cell`");
-            shape.edge_coloring_simple(3.0, 0);
-            let mut bmp = Bitmap::<Rgb<f32>>::new(cell, cell);
-            shape.generate_msdf(&mut bmp, &frame, &MsdfGeneratorConfig::default());
-
-            // msdfgen rows run bottom to top, the atlas top to bottom
-            let px: Vec<f32> = bmp
-                .raw_pixels()
-                .chunks_exact(4)
-                .map(|v| f32::from_ne_bytes(v.try_into().unwrap()))
-                .collect();
-            for y in 0..cell {
-                for x in 0..cell * 3 {
-                    let v = px[((cell - 1 - y) * cell * 3 + x) as usize];
-                    rgb[(((cy * cell + y) * w) * 3 + cx * cell * 3 + x) as usize] =
-                        (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+        let mut o = Outline::default();
+        if face.outline_glyph(id, &mut o).is_some() {
+            let mut px = vec![0f32; (cell * cell * 3) as usize]; // top row first
+            let mut q = [0.0f64; 4];
+            let r = unsafe {
+                msdf_glyph(
+                    o.ops.as_ptr(),
+                    o.ops.len(),
+                    o.pts.as_ptr(),
+                    cell,
+                    RANGE,
+                    px.as_mut_ptr(),
+                    q.as_mut_ptr(),
+                )
+            };
+            assert!(r != 2, "invalid outline for {c:?}");
+            if r == 0 {
+                for y in 0..cell {
+                    for x in 0..cell * 3 {
+                        let v = px[(y * cell * 3 + x) as usize];
+                        rgb[(((cy * cell + y) * w) * 3 + cx * cell * 3 + x) as usize] =
+                            (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    }
                 }
+                quad = q.map(|v| v / em); // the cell in em, y up
+                uv = [
+                    (cx * cell) as f64 / w as f64,
+                    (cy * cell) as f64 / h as f64,
+                    ((cx + 1) * cell) as f64 / w as f64,
+                    ((cy + 1) * cell) as f64 / h as f64,
+                ];
             }
-
-            // autoframe fits the glyph centred, uniformly scaled, with RANGE px free on every side (checked by
-            // eye on the demo text; msdfgen does not hand the scale back), so the cell covers this much font space
-            let size = (b.right - b.left).max(b.top - b.bottom);
-            let half = cell as f64 / 2.0 / ((cell as f64 - 2.0 * RANGE) / size) / em;
-            let (mx, my) = ((b.left + b.right) / 2.0 / em, (b.bottom + b.top) / 2.0 / em);
-            quad = [mx - half, my - half, mx + half, my + half];
-            uv = [
-                (cx * cell) as f64 / w as f64,
-                (cy * cell) as f64 / h as f64,
-                ((cx + 1) * cell) as f64 / w as f64,
-                ((cy + 1) * cell) as f64 / h as f64,
-            ];
         }
         recs.push(c as u32);
         recs.extend(

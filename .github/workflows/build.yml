@@ -19,6 +19,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          submodules: true
 
       - name: Install Just
         uses: taiki-e/install-action@v2
@@ -52,7 +54,7 @@ jobs:
       - name: Build bundle
         run: just bundle
 
-      - uses: actions/upload-artifact@v5
+      - uses: actions/upload-artifact@v7
         with:
           name: bundle-${{ matrix.target }}
           path: target/bundle

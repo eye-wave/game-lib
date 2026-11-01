@@ -1,0 +1,3 @@
+[submodule "crates/font/msdfgen"]
+	path = crates/font/msdfgen
+	url = https://github.com/Chlumsky/msdfgen
