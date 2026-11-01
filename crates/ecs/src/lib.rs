@@ -215,6 +215,7 @@ impl Drop for Arena {
 struct EntitySlot {
     generation: u32,
     comps: Vec<(TypeId, Handle)>, // entity -> component index
+    mask: u64, // bit i set <=> entity has the type at self.index[i]; types past 64 use the scan
 }
 
 #[derive(Default)]
@@ -347,6 +348,7 @@ impl World {
                 self.ents.push(EntitySlot {
                     generation: 0,
                     comps: Vec::new(),
+                    mask: 0,
                 });
                 Entity {
                     idx: self.ents.len() as u32 - 1,
@@ -416,6 +418,7 @@ impl World {
         }
         let s = &mut self.ents[e.idx as usize];
         s.generation = s.generation.wrapping_add(1);
+        s.mask = 0;
         self.free.push(e.idx);
         true
     }
@@ -446,6 +449,9 @@ impl World {
         };
         self.index[i].1.push((e, h));
         self.ents[e.idx as usize].comps.push((ty, h));
+        if i < 64 {
+            self.ents[e.idx as usize].mask |= 1 << i;
+        }
     }
 
     pub fn remove<T: 'static>(&mut self, e: Entity) -> Option<T> {
@@ -473,9 +479,17 @@ impl World {
     /// empty `types` yields nothing; make it a lazy iterator if allocation shows up.
     pub fn query(&self, types: &[TypeId]) -> Vec<Entity> {
         let mut lists = Vec::with_capacity(types.len());
+        let (mut want, mut rest) = (0u64, Vec::new()); // rest: types past bit 63, scan fallback
         for t in types {
-            match self.index.iter().find(|x| x.0 == *t) {
-                Some(l) => lists.push(&l.1),
+            match self.index.iter().position(|x| x.0 == *t) {
+                Some(i) => {
+                    lists.push(&self.index[i].1);
+                    if i < 64 {
+                        want |= 1 << i
+                    } else {
+                        rest.push(*t)
+                    }
+                }
                 None => return Vec::new(), // type never registered / no owners
             }
         }
@@ -486,8 +500,10 @@ impl World {
             .iter()
             .map(|&(e, _)| e)
             .filter(|e| {
-                let c = &self.ents[e.idx as usize].comps;
-                Some(*e) != self.res && types.iter().all(|t| c.iter().any(|x| x.0 == *t))
+                let s = &self.ents[e.idx as usize];
+                Some(*e) != self.res
+                    && s.mask & want == want
+                    && rest.iter().all(|t| s.comps.iter().any(|x| x.0 == *t))
             })
             .collect()
     }
@@ -504,6 +520,14 @@ impl World {
     #[inline(never)]
     fn detach(&mut self, e: Entity, ty: TypeId) {
         self.ents[e.idx as usize].comps.retain(|c| c.0 != ty);
+        if let Some(i) = self
+            .index
+            .iter()
+            .position(|x| x.0 == ty)
+            .filter(|&i| i < 64)
+        {
+            self.ents[e.idx as usize].mask &= !(1 << i);
+        }
         self.unindex(e, ty);
     }
 
