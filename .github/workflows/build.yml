@@ -19,8 +19,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
-        with:
-          submodules: true
+
+      - name: Fetch submodules
+        run: git submodule update --init --depth 1
 
       - name: Install Just
         uses: taiki-e/install-action@v2
