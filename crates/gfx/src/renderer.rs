@@ -166,6 +166,8 @@ impl Renderer {
             .upload(&self.ctx, app, fr, &self.cull, views.len());
         self.cull.dispatch(cmd, f, &views, n);
 
+        self.scene.text.record(&self.ctx, cmd, app); // first frame with an Atlas: upload it
+
         // draw every camera into the output image, then post-process / present it
         let pass = Pass {
             c: &self.ctx,

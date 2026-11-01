@@ -17,6 +17,8 @@
 //! | `mouse`       | `MouseCapture`, `Input::{mouse_delta, cursor, cursor_world, mouse_down, clicked}`     | keyboard only |
 //! | `fixed_input` | `FixedInput`                                                                          | `Input` only |
 //! | `lit`         | `Vertex`, `Material::lit`                                                             | bring your own `Material` |
+//! | `aa`          | 4x MSAA of the scene pass (3D edges and `Material::msdf` text)                      | jagged edges |
+//! | `text`        | `Atlas`, `Material::msdf` (draws the `font` crate's text meshes)                      | no texture support at all |
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -61,6 +63,9 @@ mod multicam;
 #[cfg_attr(feature = "post", path = "post.rs")]
 #[cfg_attr(not(feature = "post"), path = "post_off.rs")]
 mod post;
+#[cfg_attr(feature = "text", path = "text.rs")]
+#[cfg_attr(not(feature = "text"), path = "text_off.rs")]
+mod text;
 
 pub use assets::{Assets, Handle, Material, Mesh};
 pub use cams::MAX_CAMERAS;
@@ -80,3 +85,5 @@ pub use lit::Vertex;
 pub use mouse::MouseCapture;
 #[cfg(feature = "post")]
 pub use post::PostProcess;
+#[cfg(feature = "text")]
+pub use text::Atlas;

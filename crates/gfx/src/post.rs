@@ -7,10 +7,11 @@ use errors::prelude::*;
 use shader::Align4;
 use vulkan_sys::*;
 
-static POST: &Align4<[u8]> = shader::include_shader!("post");
+// the default pass: passthrough
+static DEFAULT: &Align4<[u8]> = shader::include_shader!("post");
 
 /// Resource: the fullscreen post-processing shader (contract in `crates/gfx/src/post.wgsl`).
-/// `None` is a passthrough. It is built the first time it is seen, so set it any time before drawing.
+/// `None` is the default pass: a passthrough (a custom shader replaces it, so it brings its own). It is built the first time it is seen, so set it any time before drawing.
 /// `.1` reaches the shader as `params.w` (a loading bar's progress, say); it may change every frame.
 #[derive(Clone, Copy, Default)]
 pub struct PostProcess(pub Option<&'static Align4<[u8]>>, pub f32);
@@ -204,7 +205,7 @@ impl Post {
         vkCmdSetViewport(cmd, 0, 1, &viewport);
         vkCmdSetScissor(cmd, 0, 1, &area);
         let PostProcess(custom, extra) = *p.app.world.resource::<PostProcess>().unwrap();
-        let shader = custom.unwrap_or(POST);
+        let shader = custom.unwrap_or(DEFAULT);
         // swapping the shader at runtime leaks the old pipeline.
         let pipe = match self.pipe {
             Some((s, pl)) if ptr::eq(s, shader) => pl,
@@ -216,6 +217,7 @@ impl Post {
                     shader,
                     sc.format,
                     false,
+                    vk::SampleCountFlags::TYPE_1,
                     &vk::PipelineVertexInputStateCreateInfo::default(),
                 );
                 self.pipe = Some((shader, pl));

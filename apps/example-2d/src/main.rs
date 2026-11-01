@@ -7,7 +7,7 @@ use core::f32::consts::{FRAC_1_SQRT_2, TAU};
 
 use ecs::{App, Schedule::*, World};
 use gfx::{Assets, Camera2d, Color, Input, Material, Mesh, RunExt, Transform};
-use math::{Vec2, Vec3};
+use math::{FloatExt, Vec2, Vec3};
 use platform::input::{
     ArrowDown, ArrowLeft, ArrowRight, ArrowUp, KeyA, KeyD, KeyS, KeyW, ShiftLeft,
 };
@@ -18,6 +18,9 @@ static FLAT: &Align4<[u8]> = include_shader!("flat");
 const ARENA: f32 = 32.0; // half-size of the play field
 const SQUARES: usize = 300;
 const SPEED: f32 = 8.0;
+
+const PLAYER_RADIUS: f32 = 0.25;
+const COLLISION_SLOP: f32 = 0.001;
 
 struct Player;
 struct Spin(f32); // radians per second
@@ -85,30 +88,131 @@ fn setup(w: &mut World, _: f32) {
     ));
 }
 
+fn circle_vs_rotated_square(
+    player: Vec2,
+    square_pos: Vec2,
+    half_size: f32,
+    angle: f32,
+    radius: f32,
+) -> Option<Vec2> {
+    let delta = player - square_pos;
+
+    let sin = angle.sin();
+    let cos = angle.cos();
+
+    // Transform into square-local coordinates.
+    let local = Vec2::new(
+        delta.x * cos + delta.y * sin,
+        -delta.x * sin + delta.y * cos,
+    );
+
+    // Closest point on the square.
+    let closest = Vec2::new(
+        local.x.clamp(-half_size, half_size),
+        local.y.clamp(-half_size, half_size),
+    );
+
+    let difference = local - closest;
+    let dist_sq = difference.length_squared();
+
+    if dist_sq >= radius * radius {
+        return None;
+    }
+
+    // Calculate collision normal.
+    let normal = if dist_sq > COLLISION_SLOP * COLLISION_SLOP {
+        difference / dist_sq.sqrt()
+    } else {
+        // Player center is inside the square.
+        let dx = half_size - local.x.abs();
+        let dy = half_size - local.y.abs();
+
+        if dx < dy {
+            Vec2::new(if local.x >= 0.0 { 1.0 } else { -1.0 }, 0.0)
+        } else {
+            Vec2::new(0.0, if local.y >= 0.0 { 1.0 } else { -1.0 })
+        }
+    };
+
+    // Rotate normal back into world space.
+    let world_normal = Vec2::new(
+        normal.x * cos - normal.y * sin,
+        normal.x * sin + normal.y * cos,
+    );
+
+    let penetration = if dist_sq > COLLISION_SLOP * COLLISION_SLOP {
+        radius - dist_sq.sqrt()
+    } else {
+        // Also push the player out if its center is inside.
+        let dx = half_size - local.x.abs();
+        let dy = half_size - local.y.abs();
+        radius + dx.min(dy)
+    };
+
+    Some(world_normal * penetration)
+}
+
 /// WASD or arrows move the player on the plane; the camera follows.
 fn steer(w: &mut World, dt: f32) {
     let input = *w.resource::<Input>().unwrap();
+
     let boost = input.is_holding(ShiftLeft) as u8 as f32 * 1.5 + 1.0;
+
     let (x, y) = (
         input.axis(&[KeyD, ArrowRight], &[KeyA, ArrowLeft]),
         input.axis(&[KeyW, ArrowUp], &[KeyS, ArrowDown]),
     );
+
     let k = if x != 0.0 && y != 0.0 {
         FRAC_1_SQRT_2
     } else {
         1.0
     };
 
-    let mut at = Vec2::ZERO;
+    // Collect obstacle transforms before mutating the player.
+    let mut obstacles = alloc::vec::Vec::new();
+
+    for e in w.query_of::<(Spin, Transform)>() {
+        let t = w.get::<Transform>(e).unwrap();
+
+        obstacles.push((t.pos.truncate(), t.scale.x * 0.5, t.yaw));
+    }
+
     for e in w.query_of::<(Player, Transform)>() {
         let t = w.get_mut::<Transform>(e).unwrap();
-        t.pos.x = (t.pos.x + x * k * SPEED * boost * dt).clamp(-ARENA, ARENA);
-        t.pos.y = (t.pos.y + y * k * SPEED * boost * dt).clamp(-ARENA, ARENA);
 
-        at = t.pos.truncate();
-    }
-    for e in w.query_of::<(Camera2d,)>() {
-        w.get_mut::<Camera2d>(e).unwrap().pos = at;
+        let movement = Vec2::new(x, y) * (k * SPEED * boost * dt);
+
+        let mut pos = t.pos.truncate() + movement;
+
+        // Resolve collisions.
+        // Multiple passes help when several squares overlap.
+        for _ in 0..4 {
+            let mut collided = false;
+
+            for &(square_pos, half_size, angle) in &obstacles {
+                if let Some(push) =
+                    circle_vs_rotated_square(pos, square_pos, half_size, angle, PLAYER_RADIUS)
+                {
+                    pos += push;
+                    collided = true;
+                }
+            }
+
+            if !collided {
+                break;
+            }
+        }
+
+        pos.x = pos.x.clamp(-ARENA, ARENA);
+        pos.y = pos.y.clamp(-ARENA, ARENA);
+
+        t.pos.x = pos.x;
+        t.pos.y = pos.y;
+
+        for e in w.query_of::<(Camera2d,)>() {
+            w.get_mut::<Camera2d>(e).unwrap().pos = pos;
+        }
     }
 }
 

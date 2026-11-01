@@ -5,6 +5,7 @@ use crate::{
     cull::Cull,
     gpu::*,
     swapchain::Swapchain,
+    text::Text,
     transform::{Color, Transform},
 };
 use alloc::vec::Vec;
@@ -75,8 +76,11 @@ pub(crate) struct Pass<'a> {
 
 pub(crate) struct Scene {
     layout: vk::PipelineLayout,
+    pub text: Text,
     meshes: Vec<Option<GpuMesh>>,
     pipes: Vec<Option<vk::Pipeline>>,
+    // with `aa`: per camera, the multisampled color and depth it draws into before resolving into the caller's target
+    msaa: [Option<(vk::Extent2D, Target, Target)>; MAX_CAMERAS],
 }
 
 /// Cache slot `i`, building it with `f` the first time.
@@ -89,6 +93,7 @@ fn slot<T>(v: &mut Vec<Option<T>>, i: usize, f: impl FnOnce() -> T) -> &T {
 
 impl Scene {
     pub unsafe fn new(c: &Ctx) -> Self {
+        let text = Text::new(c); // set 0 when `text` is on, no sets otherwise
         // the camera view is the only push constant
         let push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
@@ -96,15 +101,19 @@ impl Scene {
         let layout: vk::PipelineLayout = mk(CREATE_PIPELINE_LAYOUT_FAILED, |p| {
             vkCreatePipelineLayout(
                 c.device,
-                &vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&push),
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(text.layouts())
+                    .push_constant_ranges(&push),
                 NA,
                 p,
             )
         });
         Self {
             layout,
+            text,
             meshes: Vec::new(),
             pipes: Vec::new(),
+            msaa: core::array::from_fn(|_| None),
         }
     }
 
@@ -166,6 +175,80 @@ impl Scene {
         (groups, n)
     }
 
+    /// Camera `k`'s multisampled color and depth views, (re)made for `ext` and ready to be drawn into.
+    unsafe fn msaa(
+        &mut self,
+        p: &Pass,
+        k: usize,
+        ext: vk::Extent2D,
+    ) -> (vk::ImageView, vk::ImageView) {
+        let (c, cmd) = (p.c, p.cmd);
+        if self.msaa[k].as_ref().is_some_and(|m| m.0 != ext) {
+            ck(vkDeviceWaitIdle(c.device), WAIT_FOR_DEVICE_IDLE_FAILED);
+            let (_, col, dep) = self.msaa[k].take().unwrap();
+            destroy_target(c, &col);
+            destroy_target(c, &dep);
+        }
+        let (_, col, dep) = self.msaa[k].get_or_insert_with(|| {
+            (
+                ext,
+                make_target_ms(
+                    c,
+                    ext,
+                    p.sc.draw_format(),
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                    vk::ImageAspectFlags::COLOR,
+                    SAMPLES,
+                ),
+                make_target_ms(
+                    c,
+                    ext,
+                    DEPTH_FORMAT,
+                    vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+                    vk::ImageAspectFlags::DEPTH,
+                    SAMPLES,
+                ),
+            )
+        });
+        // contents are cleared every frame; the barriers only order this frame after the last one's use
+        transition(
+            cmd,
+            col.image,
+            vk::ImageAspectFlags::COLOR,
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            ),
+            (
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+            ),
+            (
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+            ),
+        );
+        transition(
+            cmd,
+            dep.image,
+            vk::ImageAspectFlags::DEPTH,
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
+            ),
+            (
+                vk::PipelineStageFlags::LATE_FRAGMENT_TESTS,
+                vk::PipelineStageFlags::EARLY_FRAGMENT_TESTS,
+            ),
+            (
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+                vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            ),
+        );
+        (col.view, dep.view)
+    }
+
     /// Draws every group for camera `k` into `color` / `depth` (both `ext` large), clearing them first.
     /// The caller has already moved both into their attachment layouts.
     pub unsafe fn draw(
@@ -193,8 +276,15 @@ impl Scene {
             min_depth: 0.0,
             max_depth: 1.0,
         };
-        let color = [vk::RenderingAttachmentInfo::default()
-            .image_view(color)
+        // with `aa` draw into multisampled targets of our own and resolve into `color` (the caller's depth is unused)
+        let (draw_color, depth, resolve) = if cfg!(feature = "aa") {
+            let (c, d) = self.msaa(p, k, ext);
+            (c, d, Some(color))
+        } else {
+            (color, depth, None)
+        };
+        let mut color = vk::RenderingAttachmentInfo::default()
+            .image_view(draw_color)
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
@@ -202,7 +292,15 @@ impl Scene {
                 color: vk::ClearColorValue {
                     float32: [v.sky[0], v.sky[1], v.sky[2], 1.0],
                 },
-            })];
+            });
+        if let Some(r) = resolve {
+            color = color
+                .resolve_mode(vk::ResolveModeFlags::AVERAGE)
+                .resolve_image_view(r)
+                .resolve_image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .store_op(vk::AttachmentStoreOp::DONT_CARE);
+        }
+        let color = [color];
         let depth = vk::RenderingAttachmentInfo::default()
             .image_view(depth)
             .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
@@ -232,6 +330,7 @@ impl Scene {
             let m = self.meshes[mi].as_ref().unwrap();
             let slice = k * GROUPS + g; // this camera's slice of the visible instances and `draws`
             vkCmdBindPipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
+            self.text.bind(cmd, layout, mats.0[ma].shader);
             vkCmdPushConstants(
                 cmd,
                 layout,
@@ -322,5 +421,5 @@ unsafe fn make_pipeline(
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&binds)
         .vertex_attribute_descriptions(&attrs);
-    build_pipeline(c, layout, m.shader, format, true, &vertex_input)
+    build_pipeline(c, layout, m.shader, format, true, SAMPLES, &vertex_input)
 }

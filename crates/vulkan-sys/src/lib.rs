@@ -288,6 +288,14 @@ unsafe extern "system" {
         regions: *const vk::ImageBlit,
         filter: vk::Filter,
     );
+    pub fn vkCmdCopyBufferToImage(
+        c: vk::CommandBuffer,
+        src: vk::Buffer,
+        dst: vk::Image,
+        dst_layout: vk::ImageLayout,
+        n: u32,
+        regions: *const vk::BufferImageCopy,
+    );
     pub fn vkCmdClearColorImage(
         c: vk::CommandBuffer,
         image: vk::Image,

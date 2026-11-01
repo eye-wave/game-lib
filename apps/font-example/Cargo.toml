@@ -1,0 +1,19 @@
+
+[package]
+name = "font-example"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ecs = { path = "../../crates/ecs" }
+font = { path = "../../crates/font" }
+gfx = { path = "../../crates/gfx", default-features = false, features = [
+  "cam2d",
+  "text",
+  "aa",
+] }
+platform = { path = "../../crates/platform", features = ["rt"] }
+
+[build-dependencies]
+font = { path = "../../crates/font", features = ["build"] }
+win32-sys = { path = "../../crates/win32-sys", features = ["build"] }

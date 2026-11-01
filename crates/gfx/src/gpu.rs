@@ -15,6 +15,12 @@ pub(crate) const HEIGHT: u16 = 600;
 pub(crate) const FRAMES: usize = 2;
 pub(crate) const SCENE_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM; // offscreen color
 pub(crate) const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+/// Samples per pixel of the scene pass: 4x MSAA with feature `aa`, else none.
+pub(crate) const SAMPLES: vk::SampleCountFlags = if cfg!(feature = "aa") {
+    vk::SampleCountFlags::TYPE_4
+} else {
+    vk::SampleCountFlags::TYPE_1
+};
 
 pub(crate) struct Ctx {
     pub device: vk::Device,
@@ -105,6 +111,17 @@ pub(crate) unsafe fn make_target(
     usage: vk::ImageUsageFlags,
     aspect: vk::ImageAspectFlags,
 ) -> Target {
+    make_target_ms(c, e, format, usage, aspect, vk::SampleCountFlags::TYPE_1)
+}
+
+pub(crate) unsafe fn make_target_ms(
+    c: &Ctx,
+    e: vk::Extent2D,
+    format: vk::Format,
+    usage: vk::ImageUsageFlags,
+    aspect: vk::ImageAspectFlags,
+    samples: vk::SampleCountFlags,
+) -> Target {
     let image: vk::Image = mk(CREATE_IMAGE_FAILED, |p| {
         vkCreateImage(
             c.device,
@@ -118,7 +135,7 @@ pub(crate) unsafe fn make_target(
                 })
                 .mip_levels(1)
                 .array_layers(1)
-                .samples(vk::SampleCountFlags::TYPE_1)
+                .samples(samples)
                 .tiling(vk::ImageTiling::OPTIMAL)
                 .usage(usage)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -275,6 +292,7 @@ pub(crate) unsafe fn build_pipeline(
     spv: &'static Align4<[u8]>,
     format: vk::Format,
     depth: bool,
+    samples: vk::SampleCountFlags,
     vertex_input: &vk::PipelineVertexInputStateCreateInfo,
 ) -> vk::Pipeline {
     let shader = shader_module(c.device, spv);
@@ -298,8 +316,11 @@ pub(crate) unsafe fn build_pipeline(
         .cull_mode(vk::CullModeFlags::NONE)
         .front_face(vk::FrontFace::CLOCKWISE)
         .line_width(1.0);
+    // alpha to coverage: a fragment's alpha becomes the share of samples it covers (smooth MSDF text edges, no
+    // sorting; opaque materials output alpha 1 and are unaffected)
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
-        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        .rasterization_samples(samples)
+        .alpha_to_coverage_enable(samples != vk::SampleCountFlags::TYPE_1);
     let blend_att = [vk::PipelineColorBlendAttachmentState::default()
         .color_write_mask(vk::ColorComponentFlags::RGBA)];
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_att);

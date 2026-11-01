@@ -109,6 +109,7 @@ codes! {
     game_engine {
         MATERIAL_ATTRIBUTE_FORMAT_UNSUPPORTED_ADD_ITS_SIZE_IN_MAKE_PIPELINE = 601 => "a Material vertex attribute is not an R32..R32G32B32A32 SFLOAT format; add its byte size to the offset match in make_pipeline",
         MATERIAL_HAS_MORE_THAN_4_VERTEX_ATTRIBUTES = 602 => "Material.attrs has more than the 4 vertex attributes the engine supports",
+        FONT_ATLAS_MISSING_OR_TOO_SMALL = 605 => "a Material::msdf() was drawn but there is no gfx::Atlas resource yet (insert it before the first frame), or its rgb is shorter than w * h * 3",
         ALLOC_IN_AUDIO_THREAD = 603 => "debug builds only",
     }
     assets {

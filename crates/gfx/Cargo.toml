@@ -26,3 +26,6 @@ post = []
 mouse = []
 fixed_input = []
 lit = []
+aa = [] # 4x MSAA in the scene pass (alpha-to-coverage smooths MSDF text)
+text = [
+] # MSDF text: `Atlas`, `Material::msdf`; the `font` crate makes the atlas and the meshes

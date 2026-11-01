@@ -7,6 +7,7 @@ edition = "2024"
 [dependencies]
 ecs = { path = "../../crates/ecs" }
 gfx = { path = "../../crates/gfx", default-features = false, features = [
+  "aa",
   "cam3d",
   "cull",
   "fixed_input",
