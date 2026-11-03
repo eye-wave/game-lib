@@ -50,11 +50,14 @@ fn quad_mesh() -> Mesh {
 
 fn setup(w: &mut World, _: f32) {
     let quad = w.resource_mut::<Assets<Mesh>>().unwrap().add(quad_mesh());
-    let material = w.resource_mut::<Assets<Material>>().unwrap().add(Material {
-        shader: FLAT,
-        stride: size_of::<Vertex2>() as u32,
-        attrs: &[gfx::vk::Format::R32G32B32_SFLOAT; 2],
-    });
+    let material = w
+        .resource_mut::<Assets<Material>>()
+        .unwrap()
+        .add(Material::new(
+            FLAT,
+            size_of::<Vertex2>() as u32,
+            &[gfx::vk::Format::R32G32B32_SFLOAT; 2],
+        ));
     // squares are scattered by a fixed formula, not an RNG; swap in a real one if you want it to vary per run.
     for i in 0..SQUARES {
         let f = |k: usize, m: usize| (i * k % m) as f32 / m as f32; // 0..1, different pattern per k

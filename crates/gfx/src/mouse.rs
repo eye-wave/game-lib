@@ -23,6 +23,12 @@ impl Input {
         self.mouse.delta
     }
 
+    /// Window size in pixels as of this frame (needs `cam2d`): for pixel-exact zoom and camera snapping.
+    #[cfg(feature = "cam2d")]
+    pub fn window_size(&self) -> [f32; 2] {
+        self.mouse.size
+    }
+
     /// Pointer in window pixels (x right, y down), or `None` while the window is unfocused or the mouse is captured.
     pub fn cursor(&self) -> Option<[f32; 2]> {
         self.mouse.cursor

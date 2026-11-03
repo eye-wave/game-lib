@@ -62,4 +62,41 @@ pub struct Material {
     pub shader: &'static Align4<[u8]>, // entry points: vs_main, fs_main
     pub stride: u32,
     pub attrs: &'static [vk::Format], // tightly packed, location = index
+    /// Images the fragment shader reads (feature `textures`, at most 4): texture `k` is
+    /// `@group(0) @binding(k) var t: texture_2d<f32>`, and `@group(0) @binding(4)` is a linear clamp sampler.
+    pub textures: Vec<Handle<Texture>>,
+}
+impl Material {
+    pub const fn new(
+        shader: &'static Align4<[u8]>,
+        stride: u32,
+        attrs: &'static [vk::Format],
+    ) -> Self {
+        Self {
+            shader,
+            stride,
+            attrs,
+            textures: Vec::new(),
+        }
+    }
+    pub fn with_textures(mut self, textures: &[Handle<Texture>]) -> Self {
+        self.textures = textures.to_vec();
+        self
+    }
+}
+
+/// Pixel format of a `Texture`. Both are UNORM, not SRGB: values reach the shader as stored.
+#[derive(Clone, Copy, PartialEq)]
+pub enum TexFormat {
+    R8,    // one byte per pixel (a luma / data texture)
+    Rgba8, // straight alpha
+}
+
+/// An image for `Material::textures`: `px` is tightly packed, top row first. Uploaded once, the first frame a
+/// material that lists it exists; later changes are ignored.
+pub struct Texture {
+    pub w: u32,
+    pub h: u32,
+    pub format: TexFormat,
+    pub px: Vec<u8>,
 }

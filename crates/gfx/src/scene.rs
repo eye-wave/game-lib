@@ -5,7 +5,7 @@ use crate::{
     cull::Cull,
     gpu::*,
     swapchain::Swapchain,
-    text::Text,
+    textures::Textures,
     transform::{Color, Transform},
 };
 use alloc::vec::Vec;
@@ -76,7 +76,7 @@ pub(crate) struct Pass<'a> {
 
 pub(crate) struct Scene {
     layout: vk::PipelineLayout,
-    pub text: Text,
+    pub tex: Textures,
     meshes: Vec<Option<GpuMesh>>,
     pipes: Vec<Option<vk::Pipeline>>,
     // with `aa`: per camera, the multisampled color and depth it draws into before resolving into the caller's target
@@ -93,7 +93,7 @@ fn slot<T>(v: &mut Vec<Option<T>>, i: usize, f: impl FnOnce() -> T) -> &T {
 
 impl Scene {
     pub unsafe fn new(c: &Ctx) -> Self {
-        let text = Text::new(c); // set 0 when `text` is on, no sets otherwise
+        let tex = Textures::new(c); // set 0 when `textures` is on, no sets otherwise
         // the camera view is the only push constant
         let push = [vk::PushConstantRange::default()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
@@ -102,7 +102,7 @@ impl Scene {
             vkCreatePipelineLayout(
                 c.device,
                 &vk::PipelineLayoutCreateInfo::default()
-                    .set_layouts(text.layouts())
+                    .set_layouts(tex.layouts())
                     .push_constant_ranges(&push),
                 NA,
                 p,
@@ -110,7 +110,7 @@ impl Scene {
         });
         Self {
             layout,
-            text,
+            tex,
             meshes: Vec::new(),
             pipes: Vec::new(),
             msaa: core::array::from_fn(|_| None),
@@ -330,7 +330,7 @@ impl Scene {
             let m = self.meshes[mi].as_ref().unwrap();
             let slice = k * GROUPS + g; // this camera's slice of the visible instances and `draws`
             vkCmdBindPipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipe);
-            self.text.bind(cmd, layout, mats.0[ma].shader);
+            self.tex.bind(cmd, layout, ma, mats.0[ma].shader);
             vkCmdPushConstants(
                 cmd,
                 layout,

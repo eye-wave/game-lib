@@ -55,11 +55,11 @@ impl Material {
     /// Built in, for 2D shapes: the mesh is plain `Vec3` positions, filled with the entity's `Color` (white if it has
     /// none). `Transform.yaw` rotates about z instead of y and `scale.z` is ignored. Pairs with `Camera2d`.
     pub fn flat() -> Self {
-        Self {
-            shader: FLAT,
-            stride: size_of::<Vec3>() as u32,
-            attrs: &[vk::Format::R32G32B32_SFLOAT],
-        }
+        Self::new(
+            FLAT,
+            size_of::<Vec3>() as u32,
+            &[vk::Format::R32G32B32_SFLOAT],
+        )
     }
 }
 

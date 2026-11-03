@@ -18,7 +18,8 @@
 //! | `fixed_input` | `FixedInput`                                                                          | `Input` only |
 //! | `lit`         | `Vertex`, `Material::lit`                                                             | bring your own `Material` |
 //! | `aa`          | 4x MSAA of the scene pass (3D edges and `Material::msdf` text)                      | jagged edges |
-//! | `text`        | `Atlas`, `Material::msdf` (draws the `font` crate's text meshes)                      | no texture support at all |
+//! | `textures`    | `Texture`, `Material::textures`: images a material's fragment shader reads            | `Material::textures` is ignored |
+//! | `text`        | `Atlas`, `Material::msdf` (draws the `font` crate's text meshes)                      | no `Atlas` |
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 
@@ -52,6 +53,8 @@ mod fixed_input;
 mod lit;
 #[cfg(feature = "mouse")]
 mod mouse;
+#[cfg(feature = "text")]
+mod text;
 
 // features that change how a frame is drawn: same module name and interface, the `_off` file is the cheap version
 #[cfg_attr(feature = "cull", path = "cull.rs")]
@@ -63,11 +66,11 @@ mod multicam;
 #[cfg_attr(feature = "post", path = "post.rs")]
 #[cfg_attr(not(feature = "post"), path = "post_off.rs")]
 mod post;
-#[cfg_attr(feature = "text", path = "text.rs")]
-#[cfg_attr(not(feature = "text"), path = "text_off.rs")]
-mod text;
+#[cfg_attr(feature = "textures", path = "textures.rs")]
+#[cfg_attr(not(feature = "textures"), path = "textures_off.rs")]
+mod textures;
 
-pub use assets::{Assets, Handle, Material, Mesh};
+pub use assets::{Assets, Handle, Material, Mesh, TexFormat, Texture};
 pub use cams::MAX_CAMERAS;
 pub use input::Input;
 pub use run::RunExt;

@@ -16,7 +16,7 @@ use crate::mouse::{Mouse, MouseCapture};
 use crate::post::PostProcess;
 
 /// `app.run(title)`: open a window and drive the app until it closes.
-/// Adds the `Assets<Mesh>`, `Assets<Material>` and `Input` resources first (plus `FixedInput` with `fixed_input`,
+/// Adds the `Assets<Mesh>`, `Assets<Material>` (`Assets<Texture>` with `textures`) and `Input` resources first (plus `FixedInput` with `fixed_input`,
 /// `PostProcess` with `post`), so startup systems can use them.
 pub trait RunExt {
     fn run(self, title: &CStr);
@@ -30,6 +30,9 @@ impl RunExt for App {
 unsafe fn run(mut app: App, title: &CStr) {
     app.world.insert_resource(Assets::<Mesh>::default());
     app.world.insert_resource(Assets::<Material>::default());
+    #[cfg(feature = "textures")]
+    app.world
+        .insert_resource(Assets::<crate::assets::Texture>::default());
     app.world.insert_resource(Input::default());
     #[cfg(feature = "fixed_input")]
     crate::fixed_input::init(&mut app);

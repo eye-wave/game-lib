@@ -1,6 +1,6 @@
 // Built-in material for `Material::msdf()`: text meshes of `x, y, z, u, v` vertices (the `font` crate's layout),
 // filled with the instance's `Color` (white when absent). Same instance contract as flat.wgsl; the atlas is
-// group 0 (binding 0 = the MSDF, binding 1 = a linear clamp sampler).
+// group 0 (binding 0 = the MSDF, binding 4 = a linear clamp sampler).
 struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(1) uv: vec2<f32>,
@@ -16,7 +16,7 @@ struct VsOut {
 }
 
 @group(0) @binding(0) var atlas: texture_2d<f32>;
-@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(4) var samp: sampler;
 var<immediate> vp: mat4x4<f32>;
 
 @vertex

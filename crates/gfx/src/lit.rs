@@ -15,10 +15,10 @@ pub struct Vertex {
 impl Material {
     /// For `Vertex`: location 0 = pos, 1 = normal, 2 = color.
     pub const fn lit(shader: &'static Align4<[u8]>) -> Self {
-        Self {
+        Self::new(
             shader,
-            stride: size_of::<Vertex>() as u32,
-            attrs: &[vk::Format::R32G32B32_SFLOAT; 3],
-        }
+            size_of::<Vertex>() as u32,
+            &[vk::Format::R32G32B32_SFLOAT; 3],
+        )
     }
 }

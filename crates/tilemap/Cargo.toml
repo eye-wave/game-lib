@@ -1,0 +1,24 @@
+[package]
+name = "tilemap"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ecs = { path = "../ecs", optional = true }
+errors = { path = "../errors", optional = true }
+gfx = { path = "../gfx", default-features = false, features = ["cam2d", "textures"], optional = true }
+math = { path = "../math", optional = true }
+platform = { path = "../platform", optional = true }
+shader = { path = "../shader", optional = true }
+serde = { version = "1", features = ["derive"], optional = true } # `build` only: the level source
+serde_json = { version = "1", optional = true }
+
+[build-dependencies]
+shader = { path = "../shader", features = ["build"], optional = true }
+
+[features]
+default = ["runtime"]
+# the game half: tileset materials for `gfx` and `spawn`
+runtime = ["dep:ecs", "dep:errors", "dep:gfx", "dep:math", "dep:platform", "dep:shader"]
+# `tilemap::build(..)` for a build.rs (needs `default-features = false`); turns std on and links no engine
+build = ["dep:serde", "dep:serde_json"]
