@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Tile level editor</title>
+  </head>
+  <body>
+    <header id="bar">
+      <div class="group">
+        <button id="new" title="New level">New</button>
+        <button id="open" title="Open level JSON (Ctrl+O)">Open</button>
+        <button id="save" title="Save (Ctrl+S)">Save</button>
+        <button id="saveas" title="Save as (Ctrl+Shift+S)">Save as</button>
+        <span id="filename"></span>
+      </div>
+      <div class="group" id="tools">
+        <button data-tool="brush" title="Brush (B). Drag in the palette for a multi-tile stamp.">✎ Brush <kbd>B</kbd></button>
+        <button data-tool="rect" title="Rectangle fill (R)">▭ Rect <kbd>R</kbd></button>
+        <button data-tool="fill" title="Flood fill (F)">◧ Fill <kbd>F</kbd></button>
+        <button data-tool="erase" title="Eraser (E). Right-drag erases with any paint tool.">⌫ Erase <kbd>E</kbd></button>
+        <button data-tool="pick" title="Pick (I). Alt+click picks with any tool.">⊙ Pick <kbd>I</kbd></button>
+        <button data-tool="structure" title="Structures (S)">⌂ Structure <kbd>S</kbd></button>
+        <button data-tool="event" title="Events (V)">✦ Event <kbd>V</kbd></button>
+      </div>
+      <div class="group">
+        <button id="undo" title="Undo (Ctrl+Z)">↶</button>
+        <button id="redo" title="Redo (Ctrl+Shift+Z)">↷</button>
+      </div>
+      <div class="group">
+        <label><input type="checkbox" id="grid" checked /> Grid <kbd>G</kbd></label>
+        <label><input type="checkbox" id="collision" /> Collision <kbd>C</kbd></label>
+        <label><input type="checkbox" id="overlays" checked /> Events &amp; structures <kbd>O</kbd></label>
+      </div>
+      <div class="group">
+        <label>Size <input type="number" id="mw" min="1" /> × <input type="number" id="mh" min="1" /></label>
+      </div>
+    </header>
+    <aside id="left">
+      <section>
+        <h2>Layers <span class="hint">top first · <kbd>1</kbd>–<kbd>9</kbd></span> <button id="addlayer">+ Layer</button></h2>
+        <ol id="layers"></ol>
+        <div id="layerprops"></div>
+      </section>
+      <section>
+        <h2>Textures <button id="addtex">+ Upload</button></h2>
+        <ul id="textures"></ul>
+        <p class="hint">Drop a level .json and its images anywhere. Images are kept in the browser.</p>
+      </section>
+    </aside>
+    <main id="view">
+      <canvas id="canvas"></canvas>
+      <div id="empty">Drop a level <b>.json</b> and its images here,<br />or <b>+ Upload</b> a texture to start a new one.</div>
+      <div id="status"></div>
+      <div id="toast"></div>
+    </main>
+    <aside id="right">
+      <section>
+        <h2>Palette <label><input type="checkbox" id="brushsolid" /> Solid</label></h2>
+        <div id="palettewrap"><canvas id="palette"></canvas></div>
+        <p id="brushinfo" class="hint"></p>
+      </section>
+      <section id="inspector"></section>
+      <section>
+        <h2>Problems <span id="probcount"></span></h2>
+        <ul id="problems"></ul>
+      </section>
+    </aside>
+    <input type="file" id="file" hidden />
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
