@@ -21,32 +21,25 @@ pub struct Sheet {
     pub rgba: Vec<u8>,
 }
 
-/// The two sheets as textures, shared by every level's material (so they are uploaded once).
-#[derive(Clone, Copy)]
-pub struct Tilesets {
+/// Registers a sheet as a texture: a 768 x 576 A2 sheet for the ground, a 768 x 768 B sheet for the objects. Do it once
+/// per image file and share the handle between levels, so it is uploaded once.
+pub fn sheet(w: &mut World, s: Sheet) -> Handle<Texture> {
+    w.resource_mut::<Assets<Texture>>().unwrap().add(Texture {
+        w: s.w,
+        h: s.h,
+        format: TexFormat::Rgba8,
+        px: s.rgba,
+    })
+}
+
+/// The material for `level` drawn with the sheets `level.ground_sheet` and `level.objects_sheet` (as handles from
+/// `sheet`), uploaded the first frame it is drawn. Use it with `spawn` / `set`.
+pub fn material(
+    w: &mut World,
+    level: &Level,
     ground: Handle<Texture>,
     objects: Handle<Texture>,
-}
-
-/// Registers the sheets: `ground` is a 768 x 576 A2 sheet, `objects` a 768 x 768 B sheet.
-pub fn tilesets(w: &mut World, ground: Sheet, objects: Sheet) -> Tilesets {
-    let tex = w.resource_mut::<Assets<Texture>>().unwrap();
-    let mut add = |s: Sheet| {
-        tex.add(Texture {
-            w: s.w,
-            h: s.h,
-            format: TexFormat::Rgba8,
-            px: s.rgba,
-        })
-    };
-    Tilesets {
-        ground: add(ground),
-        objects: add(objects),
-    }
-}
-
-/// The material for `level`, uploaded the first frame it is drawn. Use it with `spawn` / `set`.
-pub fn material(w: &mut World, level: &Level, sets: Tilesets) -> Handle<Material> {
+) -> Handle<Material> {
     let tex = w.resource_mut::<Assets<Texture>>().unwrap();
     let mut data = |px: &[u8]| {
         tex.add(Texture {
@@ -56,7 +49,7 @@ pub fn material(w: &mut World, level: &Level, sets: Tilesets) -> Handle<Material
             px: px.to_vec(),
         })
     };
-    let (cells, objects) = (data(&level.cells), data(&level.objects));
+    let (cells, props) = (data(&level.cells), data(&level.objects));
     w.resource_mut::<Assets<Material>>().unwrap().add(
         Material::new(
             SHADER,
@@ -64,6 +57,6 @@ pub fn material(w: &mut World, level: &Level, sets: Tilesets) -> Handle<Material
             &[vk::Format::R32G32B32_SFLOAT],
         )
         // bindings 0..3 in rpgmaker.wgsl
-        .with_textures(&[sets.ground, cells, sets.objects, objects]),
+        .with_textures(&[ground, cells, objects, props]),
     )
 }

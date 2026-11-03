@@ -109,17 +109,17 @@ codes! {
     game_engine {
         MATERIAL_ATTRIBUTE_FORMAT_UNSUPPORTED_ADD_ITS_SIZE_IN_MAKE_PIPELINE = 601 => "a Material vertex attribute is not an R32..R32G32B32A32 SFLOAT format; add its byte size to the offset match in make_pipeline",
         MATERIAL_HAS_MORE_THAN_4_VERTEX_ATTRIBUTES = 602 => "Material.attrs has more than the 4 vertex attributes the engine supports",
-        ALLOC_IN_AUDIO_THREAD = 603 => "debug builds only",
         FONT_ATLAS_MISSING_OR_TOO_SMALL = 605 => "a Material::msdf() was drawn but there is no gfx::Atlas resource yet (insert it before the first frame), or its rgb is shorter than w * h * 3",
         MATERIAL_HAS_MORE_THAN_4_TEXTURES = 606 => "Material.textures has more than the 4 images a material can bind",
         TEXTURE_PIXELS_SHORTER_THAN_W_X_H = 607 => "a Texture's px is shorter than w * h * bytes per pixel",
+        ALLOC_IN_AUDIO_THREAD = 603 => "debug builds only",
     }
     assets {
         READ_FILE_FAILED = 701 => "",
         IMAGE_DECODE_FAILED = 702 => "ffmpeg could not decode the image: missing, corrupt or truncated file, or larger than 4096 px",
         FFMPEG_MISSING = 703 => "ffmpeg could not be started: it is not installed or not on PATH",
-        AUDIO_DECODE_FAILED = 704 => "ffmpeg could not decode the sound: missing or corrupt file, or silent/empty",
         LEVEL_MISSING_OR_CORRUPT = 705 => "a level file (baked by tilemap::build) is missing from the assets directory, truncated, or not a level",
+        AUDIO_DECODE_FAILED = 704 => "ffmpeg could not decode the sound: missing or corrupt file, or silent/empty",
     }
     unknown {
         UNKNOWN_OR_UNCLASSIFIED_ERROR = 999 => ""

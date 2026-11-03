@@ -7,35 +7,58 @@ use std::{collections::HashMap, fs, path::Path};
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Source {
-    ground: Layer<Tile>,
-    objects: Option<Layer<Thing>>,
-    events: Option<Layer<Spot>>,
+    textures: Vec<TextureSrc>,
+    layers: Vec<LayerSrc>,
+    #[serde(default)]
+    events: Vec<EventSrc>,
 }
 
-/// One layer: `rows` of characters, each looked up in `legend`. `empty` (default "." in the optional layers) is a
-/// character that means nothing there; the ground has none, every cell needs a tile.
+/// An image file (by name in the assets directory) and what it is used as.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Layer<T> {
-    legend: HashMap<char, T>,
+struct TextureSrc {
+    name: String,
+    kind: KindSrc,
+}
+
+#[derive(Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "snake_case")]
+enum KindSrc {
+    Autotile,
+    Tiles,
+    Sprites,
+}
+
+/// One visual layer: `rows` of characters, each looked up in `legend`; it draws `texture` (an index into
+/// `textures`), and its legend entries have to suit that texture's kind. `empty` (default ".") is the character
+/// that means nothing there, unless the legend defines it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerSrc {
+    texture: usize,
+    legend: HashMap<char, Entry>,
     rows: Vec<String>,
     empty: Option<char>,
 }
 
+/// `kind` for autotile layers; `tile` (and `size` for sprites) for the others.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Tile {
-    kind: u8, // what the tileset shader reads: an RPG Maker A2 kind 0..31
+struct Entry {
+    kind: Option<u8>,       // autotile: RPG Maker A2 kind 0..31
+    tile: Option<[u32; 2]>, // tiles, sprites: [column, row] of the (top left) cell in the sheet
+    size: Option<[u32; 2]>, // sprites: width and height in cells, default [1, 1]
     #[serde(default)]
-    solid: bool,
+    solid: bool, // sprites: the bottom row of the footprint
 }
 
+/// Where it is (two coordinates: column, row from the top) and what it does.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Thing {
-    tile: [u32; 2], // [column, row] in the objects sheet (16 x 16 cells; the last cell is unusable)
-    #[serde(default)]
-    solid: bool,
+struct EventSrc {
+    x: u32,
+    y: u32,
+    #[serde(flatten)]
+    spot: Spot,
 }
 
 #[derive(Deserialize)]
@@ -89,33 +112,35 @@ fn put_str(out: &mut Vec<u8>, s: &str) {
     out.extend(s.as_bytes());
 }
 
-/// The cells of `l` in reading order: `None` for `empty`, else the character and its legend entry.
-fn grid<'a, T>(
-    l: &'a Layer<T>,
+/// The cells of `l` in reading order: `None` for empty, else the character and its legend entry.
+fn grid<'a>(
+    l: &'a LayerSrc,
     name: &str,
     (w, h): (usize, usize),
-    empty: Option<char>,
-) -> Result<Vec<Option<(char, &'a T)>>, String> {
+) -> Result<Vec<Option<(char, &'a Entry)>>, String> {
     if l.rows.len() != h {
-        return Err(format!("{name}: {} rows, the ground has {h}", l.rows.len()));
+        return Err(format!(
+            "{name}: {} rows, the first layer has {h}",
+            l.rows.len()
+        ));
     }
-    let empty = l.empty.or(empty);
     let mut out = Vec::new();
     for (y, row) in l.rows.iter().enumerate() {
         if row.chars().count() != w {
             return Err(format!(
-                "{name}: row {y} is {} wide, the ground is {w}",
+                "{name}: row {y} is {} wide, the first layer is {w}",
                 row.chars().count()
             ));
         }
         for (x, c) in row.chars().enumerate() {
-            out.push(if Some(c) == empty {
-                None
-            } else {
-                let t = l.legend.get(&c).ok_or(format!(
-                    "{name}: row {y}, column {x}: `{c}` is not in the legend"
-                ))?;
-                Some((c, t))
+            out.push(match l.legend.get(&c) {
+                Some(e) => Some((c, e)),
+                None if c == l.empty.unwrap_or('.') => None,
+                None => {
+                    return Err(format!(
+                        "{name}: row {y}, column {x}: `{c}` is not in the legend"
+                    ));
+                }
             });
         }
     }
@@ -161,73 +186,139 @@ fn sequence(steps: &[Step], cont: u32, out: &mut Vec<Node>, at: &str) -> Result<
 /// The level blob for source `json`, or what is wrong with it.
 pub fn bake(json: &str) -> Result<Vec<u8>, String> {
     let src: Source = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    let h = src.ground.rows.len();
-    let w = src
-        .ground
+    if src.layers.is_empty() || src.layers.len() > 100 {
+        return Err("`layers` needs 1 to 100 layers".into());
+    }
+    let h = src.layers[0].rows.len();
+    let w = src.layers[0]
         .rows
         .first()
-        .ok_or("ground: no rows")?
+        .ok_or("layers[0]: no rows")?
         .chars()
         .count();
     let size = (w, h);
 
-    let (mut cells, mut solid) = (Vec::new(), Vec::new());
-    for t in grid(&src.ground, "ground", size, None)?
-        .into_iter()
-        .flatten()
-    {
-        cells.push(t.1.kind);
-        solid.push(t.1.solid as u8);
-    }
-    let mut objects = vec![0; w * h];
-    if let Some(l) = &src.objects {
-        for (i, g) in grid(l, "objects", size, Some('.'))?.into_iter().enumerate() {
-            let Some((c, t)) = g else { continue };
-            let [col, row] = t.tile;
-            if col >= 16 || row >= 16 || row * 16 + col > 254 {
-                return Err(format!(
-                    "objects: `{c}` is cell [{col}, {row}], the sheet is 16 x 16 and the last cell is unusable"
-                ));
+    let (mut layers, mut sprites, mut solid) = (Vec::new(), Vec::new(), vec![0u8; w * h]);
+    let mut over = false; // after the first sprites layer
+    for (li, l) in src.layers.iter().enumerate() {
+        let name = format!("layers[{li}]");
+        let t = src
+            .textures
+            .get(l.texture)
+            .ok_or(format!("{name}: there is no texture {}", l.texture))?;
+        let mut cells = vec![0u8; w * h];
+        for (i, g) in grid(l, &name, size)?.into_iter().enumerate() {
+            let Some((c, e)) = g else { continue };
+            let at = format!("{name}: `{c}`");
+            let (x, y) = (i % w, i / w);
+            match t.kind {
+                KindSrc::Autotile => {
+                    let k = e
+                        .kind
+                        .filter(|&k| k <= 31)
+                        .ok_or(format!("{at} needs `kind` 0..31 (autotile)"))?;
+                    if e.tile.is_some() || e.size.is_some() {
+                        return Err(format!("{at}: `tile` and `size` are for tiles and sprites"));
+                    }
+                    cells[i] = k + 1;
+                    solid[i] |= e.solid as u8;
+                }
+                KindSrc::Tiles => {
+                    let [col, row] = e.tile.ok_or(format!("{at} needs `tile` (tiles)"))?;
+                    if col >= 16
+                        || row >= 16
+                        || row * 16 + col > 254
+                        || e.kind.is_some()
+                        || e.size.is_some()
+                    {
+                        return Err(format!(
+                            "{at}: needs `tile` [column, row] inside a 16 x 16 sheet (the last cell is unusable), no `kind`, no `size`"
+                        ));
+                    }
+                    cells[i] = (row * 16 + col + 1) as u8;
+                    solid[i] |= e.solid as u8;
+                }
+                KindSrc::Sprites => {
+                    let [col, row] = e.tile.ok_or(format!("{at} needs `tile` (sprites)"))?;
+                    let [sw, sh] = e.size.unwrap_or([1, 1]);
+                    if e.kind.is_some() || sw == 0 || sh == 0 || col + sw > 16 || row + sh > 16 {
+                        return Err(format!(
+                            "{at}: needs `tile` and `size` inside the 16 x 16 sheet, no `kind`"
+                        ));
+                    }
+                    // the character marks the bottom left cell; it has to fit on the map
+                    if x + sw as usize > w || y + 1 < sh as usize {
+                        return Err(format!(
+                            "{at} at column {x}, row {y}: a {sw} x {sh} sprite does not fit on the map"
+                        ));
+                    }
+                    sprites.push((l.texture as u32, [col, row, sw, sh, x as u32, y as u32]));
+                    if e.solid {
+                        for dx in 0..sw as usize {
+                            solid[y * w + x + dx] = 1;
+                        }
+                    }
+                }
             }
-            objects[i] = (row * 16 + col + 1) as u8;
-            solid[i] |= t.solid as u8;
+        }
+        if t.kind != KindSrc::Sprites {
+            layers.push((l.texture as u32, over, cells));
+        } else {
+            over = true;
         }
     }
 
     let (mut nodes, mut events) = (Vec::new(), Vec::new());
-    let mut scripts = HashMap::new(); // a legend character's script is baked once, however many cells use it
-    if let Some(l) = &src.events {
-        for (i, g) in grid(l, "events", size, Some('.'))?.into_iter().enumerate() {
-            let Some((c, spot)) = g else { continue };
-            let action = match spot {
-                Spot::Script(steps) => {
-                    let start = match scripts.get(&c) {
-                        Some(&s) => s,
-                        None => {
-                            let s = sequence(steps, END, &mut nodes, &format!("events: `{c}`"))?;
-                            scripts.insert(c, s);
-                            s
-                        }
-                    };
-                    Action::Script { start }
-                }
-                Spot::Goto { map, x, y } => Action::Goto {
-                    map: map.clone(),
-                    x: *x,
-                    y: *y,
-                },
-            };
-            events.push(Event {
-                x: (i % w) as u32,
-                y: (i / w) as u32,
-                action,
-            });
+    for (i, e) in src.events.iter().enumerate() {
+        if e.x as usize >= w || e.y as usize >= h {
+            return Err(format!(
+                "events[{i}]: ({}, {}) is outside the {w} x {h} map",
+                e.x, e.y
+            ));
         }
+        let action = match &e.spot {
+            Spot::Script(steps) => Action::Script {
+                start: sequence(steps, END, &mut nodes, &format!("events[{i}]"))?,
+            },
+            Spot::Goto { map, x, y } => Action::Goto {
+                map: map.clone(),
+                x: *x,
+                y: *y,
+            },
+        };
+        events.push(Event {
+            x: e.x,
+            y: e.y,
+            action,
+        });
     }
 
     let mut out = Vec::new();
-    for v in [w as u32, h as u32, events.len() as u32, nodes.len() as u32] {
-        put(&mut out, v);
+    for v in [
+        w,
+        h,
+        src.textures.len(),
+        layers.len(),
+        sprites.len(),
+        events.len(),
+        nodes.len(),
+    ] {
+        put(&mut out, v as u32);
+    }
+    for t in &src.textures {
+        put_str(&mut out, &t.name);
+        put(&mut out, t.kind as u32);
+    }
+    for (tex, over, cells) in &layers {
+        put(&mut out, *tex);
+        put(&mut out, *over as u32);
+        out.extend(cells);
+    }
+    for (tex, d) in &sprites {
+        put(&mut out, *tex);
+        for v in d {
+            put(&mut out, *v);
+        }
     }
     for e in &events {
         put(&mut out, e.x);
@@ -263,8 +354,6 @@ pub fn bake(json: &str) -> Result<Vec<u8>, String> {
             }
         }
     }
-    out.extend(cells);
-    out.extend(objects);
     out.extend(solid);
     Ok(out)
 }
@@ -272,27 +361,43 @@ pub fn bake(json: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Level;
+    use crate::{Kind, Level};
 
     const SRC: &str = r#"{
-      "ground": { "legend": { ".": { "kind": 0 }, "b": { "kind": 4, "solid": true } }, "rows": [".b.", "bb."] },
-      "objects": { "legend": { "w": { "tile": [3, 9], "solid": true } }, "rows": ["w..", "..."] },
-      "events": { "legend": {
-          "1": { "script": [
-              { "say": "hi" },
-              { "ask": { "text": "q?", "options": [ { "text": "a", "then": [ { "say": "A" } ] }, { "text": "b" } ] } },
-              { "say": "bye" } ] },
-          "D": { "goto": { "map": "other.level", "x": 2, "y": 3 } } },
-        "rows": [".1D", "..."] } }"#;
+      "textures": [ { "name": "a.png", "kind": "autotile" }, { "name": "b.png", "kind": "sprites" }, { "name": "b.png", "kind": "tiles" } ],
+      "layers": [
+        { "texture": 0, "legend": { "g": { "kind": 0 }, "b": { "kind": 4, "solid": true } }, "rows": ["gbg", "bbg"] },
+        { "texture": 1, "legend": { "T": { "tile": [5, 11], "size": [1, 2], "solid": true } }, "rows": ["...", ".T."] },
+        { "texture": 2, "legend": { "r": { "tile": [0, 4] } }, "rows": ["r..", "..."] } ],
+      "events": [
+        { "x": 1, "y": 0, "script": [
+            { "say": "hi" },
+            { "ask": { "text": "q?", "options": [ { "text": "a", "then": [ { "say": "A" } ] }, { "text": "b" } ] } },
+            { "say": "bye" } ] },
+        { "x": 2, "y": 0, "goto": { "map": "other.level", "x": 2, "y": 3 } } ] }"#;
 
     #[test]
     fn bakes_and_parses_a_level() {
         let lv = Level::parse(&bake(SRC).unwrap()).unwrap();
         assert_eq!((lv.w, lv.h), (3, 2));
-        assert_eq!(lv.cells, [0, 4, 0, 4, 4, 0]); // row 0 is the top
-        assert_eq!(lv.objects, [3 + 9 * 16 + 1, 0, 0, 0, 0, 0]);
-        assert_eq!(lv.solid, [1, 1, 0, 1, 1, 0]); // the bushes and the object
-        assert!(lv.solid_at(0, 0) && !lv.solid_at(2, 0) && lv.solid_at(-1, 0) && lv.solid_at(3, 0));
+        assert_eq!(
+            (lv.tilesets[1].name.as_str(), lv.tilesets[1].kind),
+            ("b.png", Kind::Sprites)
+        );
+        // two tile layers (the sprites are not one), the second listed after the sprites so it is `over`
+        assert_eq!(lv.layers.len(), 2);
+        assert_eq!(
+            (lv.layers[0].tileset, lv.layers[0].over, lv.layers[1].over),
+            (0, false, true)
+        );
+        assert_eq!(lv.layers[0].cells, [1, 5, 1, 5, 5, 1]); // kind + 1, row 0 is the top
+        assert_eq!(lv.layers[1].cells, [4 * 16 + 1, 0, 0, 0, 0, 0]); // row * 16 + column + 1
+        // the sprite's character marks its bottom left cell, (1, 1); 2 cells tall, it reaches up to row 0
+        assert_eq!(lv.sprites.len(), 1);
+        let s = &lv.sprites[0];
+        assert_eq!((s.col, s.row, s.w, s.h, s.x, s.y), (5, 11, 1, 2, 1, 1));
+        assert_eq!(lv.solid, [0, 1, 0, 1, 1, 0]); // the bushes; the sprite's base (1, 1) is one of those cells
+        assert!(lv.solid_at(1, 0) && !lv.solid_at(0, 0) && lv.solid_at(-1, 0) && lv.solid_at(3, 0));
         assert_eq!(lv.events.len(), 2);
         let (script, door) = (&lv.events[0], &lv.events[1]);
         assert_eq!((script.x, script.y, door.x, door.y), (1, 0, 2, 0));
@@ -310,12 +415,17 @@ mod tests {
 
     #[test]
     fn rejects_mistakes() {
-        let ground = r#""ground": { "legend": { ".": { "kind": 0 } }, "rows": [".."] }"#;
-        assert!(bake(&format!("{{ {ground} }}")).is_ok());
+        let ok = r#"{ "textures": [ { "name": "a", "kind": "autotile" } ],
+                      "layers": [ { "texture": 0, "legend": { "g": { "kind": 0 } }, "rows": ["gg"] } ]"#;
+        assert!(bake(&format!("{ok} }}")).is_ok());
+        assert!(bake(&format!("{ok}, \"typo\": 1 }}")).is_err()); // unknown field
         assert!(
-            bake(r#"{ "ground": { "legend": { ".": { "kind": 0 } }, "rows": [".x"] } }"#).is_err()
-        ); // not in legend
-        assert!(bake(&format!("{{ {ground}, \"objects\": {{ \"legend\": {{ \"a\": {{ \"tile\": [16, 0] }} }}, \"rows\": [\"a.\"] }} }}")).is_err());
-        assert!(bake(&format!("{{ {ground}, \"typo\": 1 }}")).is_err()); // unknown field
+            bake(&format!(
+                "{ok}, \"events\": [ {{ \"x\": 5, \"y\": 0, \"script\": [] }} ] }}"
+            ))
+            .is_err()
+        ); // off the map
+        assert!(bake(&ok.replace("\"rows\": [\"gg\"]", "\"rows\": [\"gx\"]")).is_err()); // `x` is not in the legend
+        assert!(bake(&ok.replace("\"kind\": 0", "\"tile\": [0, 0]")).is_err()); // a tile entry on an autotile layer
     }
 }

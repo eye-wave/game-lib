@@ -1,5 +1,5 @@
 //! MSDF text: two lorem ipsum paragraphs, word-wrapped, with some words in other colors.
-//! `Color` tints a whole mesh instance and a frame draws at most 4 (mesh, material) pairs, so the text is one
+//! `Color` tints a whole mesh instance and a frame draws at most 16 (mesh, material) pairs, so the text is one
 //! mesh per color (3), each holding only that color's words, all laid out along one shared pen.
 #![no_std]
 #![no_main]

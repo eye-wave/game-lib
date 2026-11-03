@@ -1,42 +1,52 @@
-//! Tile maps for `gfx`. The level is a luma texture, one byte per cell holding the tile kind; one fragment shader
-//! per tileset style reads it and the tileset image, so a whole map is one quad. Events (signs, people...) carry
-//! their own dialogue: lines to say and questions with options to pick from.
+//! Tile maps for `gfx`: layers drawn bottom to top, y-sorted sprites, invisible events (signs, doors...) that carry
+//! their own dialogue. One fragment shader per kind of tileset reads a layer's cells from a small luma texture, so a
+//! tile layer is one quad however big the map is.
 //!
 //! A level is an asset: the game's build.rs bakes its JSON source into a `.level` file in the workspace `assets/`
 //! directory (which a bundle ships next to the executable), and the game loads it at runtime like an image.
 //!
-//! Level source (`town.json`, not shipped): three layers of ASCII rows, each with a legend. The ground and the
-//! objects are what the shader draws; the events are invisible spots the game reacts to.
+//! Level source (`town.json`, not shipped). `textures` lists image files with the kind of tileset each is used as;
+//! a file may be listed twice with two kinds. `layers` go bottom to top, each drawing one entry of `textures`; every
+//! kind works on every layer. Layers are visual only: they have two coordinates and no height. `events` are a plain
+//! list, one cell each.
 //! ```json
-//! { "ground": {
-//!     "legend": { ".": { "kind": 0 }, "b": { "kind": 4, "solid": true } },   // kind = what the tileset shader reads
-//!     "rows": [ "....", ".b.." ] },                                           // top row first
-//!   "objects": {                                                               // optional; "." is empty
-//!     "legend": { "w": { "tile": [3, 9], "solid": true } },                    // [column, row] in the objects sheet
-//!     "rows": [ "....", "..w." ] },
-//!   "events": {                                                                // optional; "." is empty
-//!     "legend": {
-//!       "1": { "script": [                       // Z next to it: lines, and questions with answers
+//! { "textures": [
+//!     { "name": "Outside_A2.png", "kind": "autotile" },    // RPG Maker A2 floor autotiles: legend `kind` 0..31
+//!     { "name": "Outside_B.png",  "kind": "tiles" },       // 48 px cells of a 16 x 16 sheet: legend `tile`
+//!     { "name": "Outside_B.png",  "kind": "sprites" } ],   // y-sorted things: legend `tile` and `size` in cells
+//!   "layers": [
+//!     { "texture": 0, "legend": { "g": { "kind": 0 }, "b": { "kind": 4, "solid": true } },
+//!       "rows": [ "gggg", "gbgg" ] },                      // top row first
+//!     { "texture": 1, "legend": { "f": { "tile": [0, 12] } },
+//!       "rows": [ "....", "..f." ] },                      // "." means empty unless the legend has it
+//!     { "texture": 2, "legend": { "T": { "tile": [5, 11], "size": [1, 2], "solid": true } },
+//!       "rows": [ "....", "...T" ] },                      // sprites: the character marks the bottom left cell
+//!     { "texture": 1, "legend": { "r": { "tile": [0, 4] } },
+//!       "rows": [ "....", "r..." ] } ],                    // a tile layer after a sprites layer draws over it
+//!   "events": [                                            // column, row from the top
+//!     { "x": 1, "y": 1, "script": [            // Z next to it: lines, and questions with answers
 //!         { "say": "Hello!" },
 //!         { "ask": { "text": "Like it?", "options": [
 //!             { "text": "Yes", "then": [ { "say": "Me too." } ] },
-//!             { "text": "No" } ] } },            // no `then`: carry on with the steps after the ask
+//!             { "text": "No" } ] } },          // no `then`: carry on with the steps after the ask
 //!         { "say": "Bye." } ] },
-//!       "D": { "goto": { "map": "garden.level", "x": 2, "y": 6 } } },            // stepping on it: another map
-//!     "rows": [ "....", "1.D." ] } }
+//!     { "x": 3, "y": 0, "goto": { "map": "garden.level", "x": 2, "y": 6 } } ] }  // stepping on it: another map
 //! ```
+//! `solid` on a tile blocks its cell; on a sprite it blocks the bottom row of its footprint, so the hero can walk
+//! behind a tree and be hidden by its crown. A sprite is a structure: trees, houses, towers are sprites of their
+//! size, and `tilemap::see_through` thins out any that hides the hero.
 //! ```ignore
 //! tilemap::build("assets/town.json", "../../assets/town.level"); // build.rs, with features = ["build"]
-//! let level = tilemap::load("town.level");                        // game: dies if missing or corrupt
-//! let sets = tilemap::rpgmaker::tilesets(w, ground_sheet, object_sheet); // once: the images are shared by levels
-//! let material = tilemap::rpgmaker::material(w, &level, sets);           // one tileset style, one per level
-//! tilemap::spawn(w, material, (level.w, level.h));                       // later `set` swaps the level
+//! w.insert_resource(tilemap::Sheets::new(load_sheet));           // game: how to load an image file by name
+//! let level = tilemap::load("town.level");                       // dies if missing or corrupt
+//! let drawn = tilemap::prepare(w, &level);                       // GPU side, once per level
+//! let entities = tilemap::spawn(w, &drawn);                      // cheap; despawn them to leave the level
+//! // anything that walks among the sprites uses `tilemap::depth(feet_y)` for its z
+//! tilemap::see_through(w, &entities, feet, size, 0.4);       // every frame: sprites hiding the hero thin out
 //! ```
-//! New tileset styles are one module each, next to `rpgmaker`: a shader, and a `material` function that adds the
-//! textures it wants. `Level` and the baked file stay the same.
 //!
-//! The scripts are baked into a graph: `Event::start` is a node index, and each node says where to go next, so a
-//! game only follows links: show the node, wait for Z (or a pick), move to `next` / `then`, stop at `END`.
+//! The scripts are baked into a graph: `Action::Script::start` is a node index, and each node says where to go
+//! next, so a game only follows links: show the node, wait for Z (or a pick), move to `next` / `then`, stop at `END`.
 #![cfg_attr(not(feature = "build"), no_std)]
 
 extern crate alloc;
@@ -48,14 +58,50 @@ mod bake;
 #[cfg(feature = "build")]
 pub use bake::{bake, build};
 #[cfg(feature = "runtime")]
-pub mod rpgmaker;
+mod draw;
 #[cfg(feature = "runtime")]
-mod spawn;
-#[cfg(feature = "runtime")]
-pub use spawn::{load, set, spawn};
+pub use draw::{Prepared, Sheet, Sheets, depth, load, prepare, see_through, spawn};
 
 /// "No node": the script ends here.
 pub const END: u32 = u32::MAX;
+
+/// How a texture's layers are drawn.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// RPG Maker A2 floor autotiles: cell value = kind 0..31, edges picked from the 8 neighbours.
+    Autotile,
+    /// Plain 48 px cells of a sheet that is 16 cells wide.
+    Tiles,
+    /// Things of any size in cells, each its own quad, depth-sorted by y.
+    Sprites,
+}
+
+/// An image file a level draws with, and how.
+pub struct Tileset {
+    pub name: String, // in the assets directory
+    pub kind: Kind,
+}
+
+/// A tile layer (`Autotile` or `Tiles`).
+pub struct Layer {
+    pub tileset: u32,
+    /// Listed after a sprites layer: draws over the sprites and whatever walks among them.
+    pub over: bool,
+    /// `w * h` bytes, row 0 = the top: 0 = empty, else kind + 1 (`Autotile`) or row * 16 + column + 1 (`Tiles`).
+    pub cells: Vec<u8>,
+}
+
+/// One object of a sprites layer: cell (`col`, `row`) of the sheet, `w` x `h` cells, standing with its bottom left
+/// cell at (`x`, `y`) of the map, so it covers rows `y + 1 - h ..= y`.
+pub struct Sprite {
+    pub tileset: u32,
+    pub col: u32,
+    pub row: u32,
+    pub w: u32,
+    pub h: u32,
+    pub x: u32,
+    pub y: u32,
+}
 
 /// An invisible spot on the map the game reacts to.
 pub struct Event {
@@ -88,11 +134,11 @@ pub struct Choice {
 pub struct Level {
     pub w: u32,
     pub h: u32,
-    /// The ground kind of each cell, `w * h` bytes, row 0 = the top. This is a texture's pixels.
-    pub cells: Vec<u8>,
-    /// The object of each cell: 0 = none, else its cell in the objects sheet + 1 (row * 16 + column + 1).
-    pub objects: Vec<u8>,
-    /// 1 where the ground or the object is `solid`.
+    pub tilesets: Vec<Tileset>,
+    /// Tile layers, bottom to top.
+    pub layers: Vec<Layer>,
+    pub sprites: Vec<Sprite>,
+    /// `w * h` bytes: 1 where a tile or a sprite's footprint blocks.
     pub solid: Vec<u8>,
     pub events: Vec<Event>,
     /// All scripts' steps; indices are what `Action::Script::start`, `Node::Say::next` and `Choice::then` point at.
@@ -100,10 +146,13 @@ pub struct Level {
 }
 
 // Blob, all little-endian, strings are a u32 byte length then UTF-8:
-//   w, h, event count, node count (u32 each)
+//   w, h, tileset count, layer count, sprite count, event count, node count (u32 each)
+//   tilesets: name (string), kind u32 (0 autotile, 1 tiles, 2 sprites)
+//   layers: tileset u32, over u32, then w * h cell bytes
+//   sprites: tileset, col, row, w, h, x, y (u32 each)
 //   events: x, y, tag u32 (0 = script: start u32; 1 = goto: x u32, y u32, map string)
 //   nodes: tag u32 (0 = say: next u32, text; 1 = ask: text, option count u32, options: then u32, label)
-//   w * h ground kinds, w * h objects, w * h solid flags; row 0 = the top of the map
+//   w * h solid flags; row 0 = the top of the map
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
@@ -126,7 +175,39 @@ impl Level {
     pub fn parse(b: &[u8]) -> Option<Self> {
         let mut r = Reader(b);
         let (w, h) = (r.u32()?, r.u32()?);
-        let (ne, nn) = (r.u32()?, r.u32()?);
+        let n = (w as usize).checked_mul(h as usize)?;
+        let (nt, nl, ns, ne, nn) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+        let mut tilesets = Vec::new();
+        for _ in 0..nt {
+            let name = r.str()?;
+            let kind = match r.u32()? {
+                0 => Kind::Autotile,
+                1 => Kind::Tiles,
+                2 => Kind::Sprites,
+                _ => return None,
+            };
+            tilesets.push(Tileset { name, kind });
+        }
+        let mut layers = Vec::new();
+        for _ in 0..nl {
+            layers.push(Layer {
+                tileset: r.u32()?,
+                over: r.u32()? != 0,
+                cells: r.take(n)?.to_vec(),
+            });
+        }
+        let mut sprites = Vec::new();
+        for _ in 0..ns {
+            sprites.push(Sprite {
+                tileset: r.u32()?,
+                col: r.u32()?,
+                row: r.u32()?,
+                w: r.u32()?,
+                h: r.u32()?,
+                x: r.u32()?,
+                y: r.u32()?,
+            });
+        }
         let mut events = Vec::new();
         for _ in 0..ne {
             events.push(Event {
@@ -167,44 +248,48 @@ impl Level {
                 _ => return None,
             });
         }
-        let n = (w as usize).checked_mul(h as usize)?;
-        let (cells, objects, solid) = (
-            r.take(n)?.to_vec(),
-            r.take(n)?.to_vec(),
-            r.take(n)?.to_vec(),
-        );
-        // every link must land on a node, so following them never panics
+        let solid = r.take(n)?.to_vec();
+        // everything that points somewhere must point at something, so using a level never panics
+        let kind_of = |t: u32| tilesets.get(t as usize).map(|t| t.kind);
         let ok = |i: u32| i == END || (i as usize) < nodes.len();
-        let linked = events.iter().all(|e| {
-            e.x < w && e.y < h && !matches!(e.action, Action::Script { start } if !ok(start))
-        }) && nodes.iter().all(|n| match n {
-            Node::Say { next, .. } => ok(*next),
-            Node::Ask { options, .. } => options.iter().all(|o| ok(o.then)),
-        });
-        (w > 0 && h > 0 && linked).then_some(Self {
+        let valid = w > 0
+            && h > 0
+            && layers
+                .iter()
+                .all(|l| matches!(kind_of(l.tileset), Some(Kind::Autotile | Kind::Tiles)))
+            && sprites.iter().all(|s| {
+                kind_of(s.tileset) == Some(Kind::Sprites)
+                    && s.w > 0
+                    && s.h > 0
+                    && s.x + s.w <= w
+                    && s.y < h
+                    && s.y + 1 >= s.h
+            })
+            && events.iter().all(|e| {
+                e.x < w && e.y < h && !matches!(e.action, Action::Script { start } if !ok(start))
+            })
+            && nodes.iter().all(|n| match n {
+                Node::Say { next, .. } => ok(*next),
+                Node::Ask { options, .. } => options.iter().all(|o| ok(o.then)),
+            });
+        valid.then_some(Self {
             w,
             h,
-            cells,
-            objects,
+            tilesets,
+            layers,
+            sprites,
             solid,
             events,
             nodes,
         })
     }
 
-    /// Does the ground or an object block column `x`, row `y` (from the top)? Off the map does.
+    /// Does a tile or a sprite's footprint block column `x`, row `y` (from the top)? Off the map does.
     pub fn solid_at(&self, x: i32, y: i32) -> bool {
         x < 0
             || y < 0
             || x >= self.w as i32
             || y >= self.h as i32
             || self.solid[y as usize * self.w as usize + x as usize] != 0
-    }
-
-    /// The kind at column `x`, row `y` (from the top); the nearest edge cell outside the map, like the shaders.
-    pub fn kind(&self, x: i32, y: i32) -> u8 {
-        let x = x.clamp(0, self.w as i32 - 1) as usize;
-        let y = y.clamp(0, self.h as i32 - 1) as usize;
-        self.cells[y * self.w as usize + x]
     }
 }

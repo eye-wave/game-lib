@@ -3,7 +3,7 @@
 // Each camera has its own GROUPS-sized slice of `visible` and `draws`.
 // Must match GROUPS / CAP / Inst in lib.rs.
 const CAP = 4096u;
-const GROUPS = 4u;
+const GROUPS = 16u;
 
 struct Inst {
     a: vec4<f32>,     // x, y, z, yaw

@@ -15,7 +15,7 @@ use shader::Align4;
 use vulkan_sys::*;
 
 const SLOTS: usize = 4; // images per material: bindings 0..3, the sampler is 4
-const MAX_SETS: u32 = 64; // materials with textures, plus the atlas
+const MAX_SETS: u32 = 256; // materials with textures, plus the atlas
 
 pub(crate) struct Textures {
     layout: vk::DescriptorSetLayout,

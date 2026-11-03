@@ -16,7 +16,7 @@ use errors::prelude::*;
 use platform::die;
 use vulkan_sys::*;
 
-pub(crate) const GROUPS: usize = 4; // distinct (mesh, material) pairs drawn per frame
+pub(crate) const GROUPS: usize = 16; // distinct (mesh, material) pairs drawn per frame
 pub(crate) const CAP: usize = 4096; // instances per group; must match cull.wgsl
 
 /// One drawable, as the culling shader and the vertex shader read it (std430: 3 x vec4).

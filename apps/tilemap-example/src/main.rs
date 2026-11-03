@@ -1,8 +1,8 @@
-//! Two-layer RPG Maker tilemaps drawn by one fragment shader (the `tilemap` crate), a walking hero, dialogue and
-//! map changes with a fade.
+//! Layered RPG Maker tilemaps (the `tilemap` crate): autotile and tile layers drawn by fragment shaders, y-sorted
+//! sprites (trees, signs, towers) the hero walks behind, overlays above them; dialogue and map changes with a fade.
 //! WASD / arrows walk, Shift runs, Q / E zoom (whole-pixel steps), Z talks to signs (turns the page, takes the picked
 //! answer; W / S choose), Esc quits. Solid ground and objects block.
-//! A level is assets/<name>.json in this app, baked by build.rs (`tilemap::build`) into the workspace
+//! A level is assets/<name>.json in this app (it names its own image files), baked by build.rs (`tilemap::build`) into the workspace
 //! assets/<name>.level and loaded at runtime like the images: ground kinds and object cells as two small textures,
 //! plus invisible events (Z to talk, or step on a door to change map). Dialogue is a pixel font
 //! (assets/pixel.png + pixel.json, as in bitmap-font-example) on flat quads that `view` pins to the bottom of the
@@ -12,7 +12,7 @@
 
 extern crate alloc;
 
-use alloc::{string::String, vec::Vec};
+use alloc::{rc::Rc, string::String, vec::Vec};
 use core::f32::consts::FRAC_1_SQRT_2;
 
 use ecs::{App, Entity, Schedule::*, World};
@@ -28,10 +28,7 @@ use platform::{
     },
 };
 use shader::{Align4, include_shader};
-use tilemap::{
-    Action, END, Level, Node,
-    rpgmaker::{self, Sheet, Tilesets},
-};
+use tilemap::{Action, END, Level, Node, Prepared, Sheet, Sheets};
 
 static FADE: &Align4<[u8]> = include_shader!("fade");
 
@@ -48,6 +45,8 @@ const BOX_MIN: f32 = 112.0; // its least height: 4 lines + padding; it grows for
 const INDENT: f32 = 2.0; // ems before an answer, room for the marker
 const GAP: f32 = 16.0; // box to screen edge, and text to box edge
 const HALF: Vec2 = Vec2::new(0.28, 0.14); // half size of the feet box, tiles
+const BODY: Vec2 = Vec2::new(0.5, 0.8); // the hero's drawn size, tiles (see `person`)
+const SEE_THROUGH: f32 = 0.4; // share of a sprite's pixels dropped while it hides the hero
 
 /// A script node's text, laid out once: question or line first, then the answers, all in one mesh (the engine
 /// draws only a few distinct meshes per frame).
@@ -60,14 +59,13 @@ struct View {
 struct Map {
     name: String,
     level: Level,
-    ground: Handle<Material>,
-    views: Vec<View>, // by node index
+    drawn: Rc<Prepared>, // its materials; shared, so entering the level again only spawns entities
+    views: Vec<View>,    // by node index
 }
 struct Maps {
     list: Vec<Map>,
     cur: usize,
-    ground: Option<Entity>, // the one quad that shows the current map
-    sets: Tilesets,
+    entities: Vec<Entity>, // what the current map spawned: layers and sprites
 }
 struct Talk {
     at: Option<(u32, usize)>, // (node, picked answer)
@@ -110,6 +108,7 @@ struct Cam {
 }
 struct Part {
     off: Vec2, // from the feet
+    z: f32,    // among the figure's parts, added to the depth of its feet
 }
 
 fn quad_mesh() -> Mesh {
@@ -129,6 +128,16 @@ fn cur(w: &World) -> &Map {
     &m.list[m.cur]
 }
 
+/// How `tilemap` loads the image files a level names.
+fn load_sheet(name: &str) -> Sheet {
+    let i = media::load_image(name).unwrap_or_else(|e| die(e));
+    Sheet {
+        w: i.w,
+        h: i.h,
+        rgba: i.rgba,
+    }
+}
+
 /// The index of level asset `name` in `Maps`, loading it the first time.
 fn add_map(w: &mut World, name: &str) -> usize {
     if let Some(i) = w
@@ -141,8 +150,7 @@ fn add_map(w: &mut World, name: &str) -> usize {
         return i;
     }
     let level = tilemap::load(name);
-    let sets = w.resource::<Maps>().unwrap().sets;
-    let ground = rpgmaker::material(w, &level, sets);
+    let drawn = Rc::new(tilemap::prepare(w, &level));
     let font = font::include_font!("pixel");
     // every node's text, laid out once; answers start on their own lines, indented
     let views = level
@@ -178,55 +186,46 @@ fn add_map(w: &mut World, name: &str) -> usize {
     maps.list.push(Map {
         name: String::from(name),
         level,
-        ground,
+        drawn,
         views,
     });
     maps.list.len() - 1
 }
 
-/// A little person from flat quads: (offset from the feet, size, z, color); no sprite sheet needed. The parts
-/// follow `Hero` (see `view`).
+/// A little person from flat quads: (offset from the feet, size, z among the parts, color); no sprite sheet needed.
+/// The parts follow `Hero` and sort by depth among the level's sprites (see `view`).
 fn person(w: &mut World, ui: Ui, at: Vec2, body: [f32; 3], hair: [f32; 3]) {
     let parts = [
         (
             Vec2::new(0.0, 0.02),
             Vec2::new(0.50, 0.14),
-            0.5,
+            0.000,
             [0.20, 0.42, 0.14],
         ), // shadow
-        (Vec2::new(0.0, 0.30), Vec2::new(0.34, 0.34), 1.0, body),
+        (Vec2::new(0.0, 0.30), Vec2::new(0.34, 0.34), 0.001, body),
         (
             Vec2::new(0.0, 0.62),
             Vec2::new(0.30, 0.28),
-            1.1,
+            0.002,
             [0.96, 0.78, 0.62],
         ), // head
-        (Vec2::new(0.0, 0.74), Vec2::new(0.34, 0.12), 1.2, hair),
+        (Vec2::new(0.0, 0.74), Vec2::new(0.34, 0.12), 0.003, hair),
     ];
     for (off, size, z, rgb) in parts {
         let t = Transform {
             scale: size.extend(1.0),
-            ..Transform::from_pos(at.x + off.x, at.y + off.y, z)
+            ..Transform::from_pos(at.x + off.x, at.y + off.y, tilemap::depth(at.y) + z)
         };
-        w.spawn_with((Part { off }, t, ui.quad, ui.flat, Color(rgb)));
+        w.spawn_with((Part { off, z }, t, ui.quad, ui.flat, Color(rgb)));
     }
 }
 
 fn setup(w: &mut World, _: f32) {
-    let sheet = |name: &str| {
-        let i = media::load_image(name).unwrap_or_else(|e| die(e));
-        Sheet {
-            w: i.w,
-            h: i.h,
-            rgba: i.rgba,
-        }
-    };
-    let sets = rpgmaker::tilesets(w, sheet("Outside_A2.png"), sheet("Outside_B.png"));
+    w.insert_resource(Sheets::new(load_sheet));
     w.insert_resource(Maps {
         list: Vec::new(),
         cur: 0,
-        ground: None,
-        sets,
+        entities: Vec::new(),
     });
 
     let img = media::load_image("pixel.png").unwrap_or_else(|e| die(e));
@@ -259,12 +258,14 @@ fn setup(w: &mut World, _: f32) {
     *w.resource_mut::<PostProcess>().unwrap() = PostProcess(Some(FADE), 0.0);
 
     let first = add_map(w, "town.level");
-    let m = &w.resource::<Maps>().unwrap().list[first];
-    let (material, size) = (m.ground, (m.level.w, m.level.h));
-    let ground = tilemap::spawn(w, material, size);
-    w.resource_mut::<Maps>().unwrap().ground = Some(ground);
+    let (drawn, h) = {
+        let m = &w.resource::<Maps>().unwrap().list[first];
+        (m.drawn.clone(), m.level.h)
+    };
+    let entities = tilemap::spawn(w, &drawn);
+    w.resource_mut::<Maps>().unwrap().entities = entities;
 
-    let hero = Vec2::new(12.5, size.1 as f32 - 13.5);
+    let hero = Vec2::new(12.5, h as f32 - 13.5);
     person(w, ui, hero, [0.22, 0.35, 0.75], [0.35, 0.20, 0.10]);
     w.insert_resource(Hero { pos: hero });
     w.insert_resource(Cam {
@@ -480,14 +481,18 @@ fn exits(w: &mut World, _: f32) {
 /// Switches to level asset `name` and puts the hero on cell (`x`, `y`); the camera jumps instead of gliding.
 fn enter(w: &mut World, name: &str, x: u32, y: u32) {
     let i = add_map(w, name);
-    let m = &w.resource::<Maps>().unwrap().list[i];
-    let (material, size) = (m.ground, (m.level.w, m.level.h));
+    let (drawn, h) = {
+        let m = &w.resource::<Maps>().unwrap().list[i];
+        (m.drawn.clone(), m.level.h)
+    };
+    for e in core::mem::take(&mut w.resource_mut::<Maps>().unwrap().entities) {
+        w.despawn(e);
+    }
+    let entities = tilemap::spawn(w, &drawn);
     let maps = w.resource_mut::<Maps>().unwrap();
     maps.cur = i;
-    let ground = maps.ground.unwrap();
-    tilemap::set(w, ground, material, size);
-    w.resource_mut::<Hero>().unwrap().pos =
-        Vec2::new(x as f32 + 0.5, size.1 as f32 - y as f32 - 0.5);
+    maps.entities = entities;
+    w.resource_mut::<Hero>().unwrap().pos = Vec2::new(x as f32 + 0.5, h as f32 - y as f32 - 0.5);
     w.resource_mut::<Cam>().unwrap().ready = false;
 }
 
@@ -594,11 +599,17 @@ fn view(w: &mut World, dt: f32) {
     }
     let feet = Vec2::new(snap(hero.x, ppu, 0.0), snap(hero.y, ppu, 0.0));
     for e in w.query_of::<(Part, Transform)>() {
-        let off = w.get::<Part>(e).unwrap().off;
+        let (off, z) = {
+            let p = w.get::<Part>(e).unwrap();
+            (p.off, p.z)
+        };
         let t = w.get_mut::<Transform>(e).unwrap();
         t.pos.x = feet.x + off.x;
         t.pos.y = feet.y + off.y;
+        t.pos.z = tilemap::depth(feet.y) + z; // behind what is below it, in front of what is above
     }
+    let ents = w.resource::<Maps>().unwrap().entities.clone();
+    tilemap::see_through(w, &ents, hero, BODY, SEE_THROUGH);
 }
 
 fn game() {
