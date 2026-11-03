@@ -77,8 +77,14 @@ fn sheet(w: &mut World, name: &str) -> Handle<Texture> {
 #[derive(Clone, Copy)]
 struct Fades(Handle<Material>, Handle<Material>);
 
+/// Component on everything `spawn` makes: which layer it is drawn for. Tile layers are 0.. in `Level::layers`
+/// order (a structure's quads count as their layer's), then each sprite sheet, in the order of `Level::tilesets`.
+/// For debugging and such: hide a layer by moving its entities' z out of the camera's range.
+pub struct LayerOf(pub u32);
+
 /// A quad of the level: where it goes, and its `Color` as the shader wants it.
 struct Draw {
+    layer: u32,
     mats: Fades,
     pos: Vec3,
     scale: Vec3,
@@ -149,6 +155,7 @@ pub fn prepare(w: &mut World, level: &Level) -> Prepared {
         for (k, s) in level.structures.iter().enumerate() {
             let (pos, scale) = place(level, s.x, s.y, s.w, s.h);
             structures.push(Draw {
+                layer: i as u32,
                 mats,
                 // its layers in order, all well within one row's step
                 pos: Vec3::new(pos.x, pos.y, pos.z + i as f32 * STRUCT_LAYER_STEP),
@@ -159,6 +166,10 @@ pub fn prepare(w: &mut World, level: &Level) -> Prepared {
     }
     let mut mats: Vec<(u32, Fades)> = Vec::new(); // one pair per sprite sheet
     let mut sprites = Vec::new();
+    let sheet_rank = |t: u32| {
+        let sheet = |k: &&crate::Tileset| k.kind == Kind::Sprites;
+        level.tilesets[..t as usize].iter().filter(sheet).count() as u32
+    };
     for s in &level.sprites {
         let m = match mats.iter().find(|m| m.0 == s.tileset) {
             Some(m) => m.1,
@@ -170,6 +181,7 @@ pub fn prepare(w: &mut World, level: &Level) -> Prepared {
         };
         let (pos, scale) = place(level, s.x, s.y, s.w, s.h);
         sprites.push(Draw {
+            layer: level.layers.len() as u32 + sheet_rank(s.tileset),
             mats: m,
             pos,
             scale,
@@ -215,21 +227,22 @@ pub fn spawn(w: &mut World, p: &Prepared) -> Vec<Entity> {
     let quad = w.resource::<Quad>().unwrap().0;
     let (mw, mh) = (p.size.0 as f32, p.size.1 as f32);
     let mut out = Vec::new();
-    for &(material, z, structures) in &p.layers {
+    for (i, &(material, z, structures)) in p.layers.iter().enumerate() {
         let t = Transform {
             scale: Vec3::new(mw, mh, 1.0),
             ..Transform::from_pos(mw / 2.0, mh / 2.0, z)
         };
         // structure 0: the cells no structure has
         let tint = Color([0.0, structures as u32 as f32, 1.0]);
-        out.push(w.spawn_with((t, quad, material, tint)));
+        out.push(w.spawn_with((t, quad, material, tint, LayerOf(i as u32))));
     }
     for d in p.sprites.iter().chain(&p.structures) {
         let t = Transform {
             scale: d.scale,
             ..Transform::from_pos(d.pos.x, d.pos.y, d.pos.z)
         };
-        out.push(w.spawn_with((t, quad, d.mats.0, Color(d.tint), d.mats)));
+        let layer = LayerOf(d.layer);
+        out.push(w.spawn_with((t, quad, d.mats.0, Color(d.tint), d.mats, layer)));
     }
     out
 }

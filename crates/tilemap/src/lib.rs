@@ -69,7 +69,7 @@ pub use bake::{bake, build};
 #[cfg(feature = "runtime")]
 mod draw;
 #[cfg(feature = "runtime")]
-pub use draw::{Prepared, Sheet, Sheets, depth, load, prepare, see_through, spawn};
+pub use draw::{LayerOf, Prepared, Sheet, Sheets, depth, load, prepare, see_through, spawn};
 
 /// "No node": the script ends here.
 pub const END: u32 = u32::MAX;

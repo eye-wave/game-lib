@@ -1,7 +1,7 @@
 //! Layered RPG Maker tilemaps (the `tilemap` crate): autotile and tile layers drawn by fragment shaders, y-sorted
 //! sprites (trees, signs, towers) the hero walks behind, overlays above them; dialogue and map changes with a fade.
 //! WASD / arrows walk, Shift runs, Q / E zoom (whole-pixel steps), Z talks to signs (turns the page, takes the picked
-//! answer; W / S choose), Esc quits. Solid ground and objects block.
+//! answer; W / S choose), 1-9 hide / show a layer (debug), Esc quits. Solid ground and objects block.
 //! A level is assets/<name>.json in this app (it names its own image files), baked by build.rs (`tilemap::build`) into the workspace
 //! assets/<name>.level and loaded at runtime like the images: ground kinds and object cells as two small textures,
 //! plus invisible events (Z to talk, or step on a door to change map). Dialogue is a pixel font
@@ -23,8 +23,8 @@ use math::{Vec2, Vec3};
 use platform::{
     die,
     input::{
-        ArrowDown, ArrowLeft, ArrowRight, ArrowUp, KeyA, KeyD, KeyE, KeyQ, KeyS, KeyW, KeyZ,
-        ShiftLeft,
+        ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6,
+        Digit7, Digit8, Digit9, KeyA, KeyD, KeyE, KeyQ, KeyS, KeyW, KeyZ, ShiftLeft,
     },
 };
 use shader::{Align4, include_shader};
@@ -611,6 +611,28 @@ fn view(w: &mut World, dt: f32) {
     tilemap::see_through(w, hero, BODY_W, SEE_THROUGH, dt);
 }
 
+/// Debug: 1-9 hide / show the current map's layers (`tilemap::LayerOf`: tile layers first, then sprite sheets) by
+/// pushing them past the camera's far end. Entering a map shows everything again.
+fn layers(w: &mut World, _: f32) {
+    let input = *w.resource::<Input>().unwrap();
+    let keys = [
+        Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9,
+    ];
+    let Some(k) = keys.iter().position(|&d| input.just_pressed(d)) else {
+        return;
+    };
+    for e in w.query_of::<(tilemap::LayerOf, Transform)>() {
+        if w.get::<tilemap::LayerOf>(e).unwrap().0 == k as u32 {
+            let z = &mut w.get_mut::<Transform>(e).unwrap().pos.z;
+            *z = if *z < -500.0 {
+                *z + 1000.0
+            } else {
+                *z - 1000.0
+            }; // past `gfx::DEPTH2D`
+        }
+    }
+}
+
 fn game() {
     let mut app = App::new();
     app.add_system(Startup, setup)
@@ -618,6 +640,7 @@ fn game() {
         .add_system(Update, walk)
         .add_system(Update, exits)
         .add_system(Update, fade)
+        .add_system(Update, layers)
         .add_system(Update, view); // last: the camera sees this frame's position, even right after a map change
     app.world.spawn_with((Camera2d::default(),));
     app.run(c"Tilemap: WASD / arrows walk, Shift runs, Q/E zoom, Z talks, Esc quits");
