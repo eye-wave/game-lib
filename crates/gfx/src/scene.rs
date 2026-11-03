@@ -322,7 +322,16 @@ impl Scene {
         );
         vkCmdSetViewport(cmd, 0, 1, &viewport);
         vkCmdSetScissor(cmd, 0, 1, &area);
-        for (g, &(mi, ma)) in p.groups.iter().enumerate() {
+        // opaque groups first, then the blending ones over them
+        // ponytail: blending groups draw in first-seen order, unsorted: two see-through things overlapping may
+        // blend in the wrong order; sort them back to front by z if that shows
+        let order = (0..2).flat_map(|pass| {
+            p.groups
+                .iter()
+                .enumerate()
+                .filter(move |&(_, &(_, ma))| mats.0[ma].blend == (pass == 1))
+        });
+        for (g, &(mi, ma)) in order {
             // one pipeline bind per group; fine while groups are few.
             let pipe = *slot(&mut self.pipes, ma, || {
                 make_pipeline(p.c, layout, fmt, &mats.0[ma])
@@ -421,5 +430,14 @@ unsafe fn make_pipeline(
     let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
         .vertex_binding_descriptions(&binds)
         .vertex_attribute_descriptions(&attrs);
-    build_pipeline(c, layout, m.shader, format, true, SAMPLES, &vertex_input)
+    build_pipeline(
+        c,
+        layout,
+        m.shader,
+        format,
+        true,
+        m.blend,
+        SAMPLES,
+        &vertex_input,
+    )
 }

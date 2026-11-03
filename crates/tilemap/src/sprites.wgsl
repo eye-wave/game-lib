@@ -1,13 +1,13 @@
 // Sprites (`Kind::Sprites`): one instance per object, drawn as its own quad so it can sort by depth with the hero
 // and the other sprites (see `tilemap::depth`). The Transform scale is the size in cells, and the entity's Color
-// is (column, row, fade) of the sprite's top-left cell in the sheet, so every sprite of a sheet is one instanced
-// draw. See-through texels are discarded: there is no blending. `fade` (0..1, see `tilemap::see_through`) drops
-// that share of the rest in a 4 x 4 screen-pixel dither, so whatever stands behind shows through.
+// is (column, row, opacity) of the sprite's top-left cell in the sheet, so every sprite of a sheet is one instanced
+// draw. See-through texels are discarded; the alpha is the opacity (for a blending material, see
+// `tilemap::see_through`).
 struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(4) a: vec4<f32>,    // x, y, z, angle
     @location(5) s: vec4<f32>,    // scale x, y: the size in cells
-    @location(6) tint: vec4<f32>, // rgb = (column, row, fade)
+    @location(6) tint: vec4<f32>, // rgb = (column, row, opacity)
 }
 
 struct VsOut {
@@ -42,10 +42,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let px = vec2(in.uv.x, 1.0 - in.uv.y) * in.size * f32(TILE);
     let q = min(vec2<i32>(floor(px)), vec2<i32>(in.size * f32(TILE)) - 1);
     let t = textureLoad(sheet, vec2<i32>(in.src) * TILE + q, 0);
-    var bayer = array<f32, 16>(0., 8., 2., 10., 12., 4., 14., 6., 3., 11., 1., 9., 15., 7., 13., 5.);
-    let d = (bayer[u32(in.pos.x) % 4u + (u32(in.pos.y) % 4u) * 4u] + 0.5) / 16.0;
-    if t.a < 0.5 || d < in.fade {
+    if t.a < 0.5 {
         discard;
     }
-    return vec4<f32>(t.rgb, 1.0);
+    return vec4<f32>(t.rgb, in.fade);
 }

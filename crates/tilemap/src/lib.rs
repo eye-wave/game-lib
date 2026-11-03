@@ -22,7 +22,11 @@
 //!     { "texture": 2, "legend": { "T": { "tile": [5, 11], "size": [1, 2], "solid": true } },
 //!       "rows": [ "....", "...T" ] },                      // sprites: the character marks the bottom left cell
 //!     { "texture": 1, "legend": { "r": { "tile": [0, 4] } },
-//!       "rows": [ "....", "r..." ] } ],                    // a tile layer after a sprites layer draws over it
+//!       "rows": [ "....", "r..." ] },                      // a tile layer after a sprites layer draws over it
+//!     { "texture": 1, "legend": { "w": { "tile": [2, 4], "solid": true }, "R": { "tile": [2, 3] } },
+//!       "structures": true,                                // its cells inside a structure belong to it
+//!       "rows": [ "RR..", "ww.." ] } ],
+//!   "structures": [ { "x": 0, "y": 1, "size": [2, 2] } ],  // a building: bottom left cell and size, like a sprite
 //!   "events": [                                            // column, row from the top
 //!     { "x": 1, "y": 1, "script": [            // Z next to it: lines, and questions with answers
 //!         { "say": "Hello!" },
@@ -33,8 +37,13 @@
 //!     { "x": 3, "y": 0, "goto": { "map": "garden.level", "x": 2, "y": 6 } } ] }  // stepping on it: another map
 //! ```
 //! `solid` on a tile blocks its cell; on a sprite it blocks the bottom row of its footprint, so the hero can walk
-//! behind a tree and be hidden by its crown. A sprite is a structure: trees, houses, towers are sprites of their
-//! size, and `tilemap::see_through` thins out any that hides the hero.
+//! behind a tree and be hidden by its crown.
+//!
+//! A structure is a building (or anything) drawn with tiles: a rectangle of the map, declared like a sprite
+//! (bottom left cell and size). The cells inside it of every layer marked `"structures": true` belong to it: they
+//! are depth-sorted together by its bottom edge, like one big sprite, and fade together. Mark its walls `solid` in
+//! the legend (or `"solid": true` on the structure blocks its bottom row, like a sprite) and leave the roof walkable,
+//! so the hero can walk behind it. Sprites and structures that hide the hero fade out a little: `see_through`.
 //! ```ignore
 //! tilemap::build("assets/town.json", "../../assets/town.level"); // build.rs, with features = ["build"]
 //! w.insert_resource(tilemap::Sheets::new(load_sheet));           // game: how to load an image file by name
@@ -42,7 +51,7 @@
 //! let drawn = tilemap::prepare(w, &level);                       // GPU side, once per level
 //! let entities = tilemap::spawn(w, &drawn);                      // cheap; despawn them to leave the level
 //! // anything that walks among the sprites uses `tilemap::depth(feet_y)` for its z
-//! tilemap::see_through(w, &entities, feet, size, 0.4);       // every frame: sprites hiding the hero thin out
+//! tilemap::see_through(w, feet, 0.5, 0.6, dt);              // every frame: what hides the hero fades to 60 %
 //! ```
 //!
 //! The scripts are baked into a graph: `Action::Script::start` is a node index, and each node says where to go
@@ -87,6 +96,8 @@ pub struct Layer {
     pub tileset: u32,
     /// Listed after a sprites layer: draws over the sprites and whatever walks among them.
     pub over: bool,
+    /// Its cells inside a `Structure` are drawn with that structure instead.
+    pub structures: bool,
     /// `w * h` bytes, row 0 = the top: 0 = empty, else kind + 1 (`Autotile`) or row * 16 + column + 1 (`Tiles`).
     pub cells: Vec<u8>,
 }
@@ -101,6 +112,15 @@ pub struct Sprite {
     pub h: u32,
     pub x: u32,
     pub y: u32,
+}
+
+/// A rectangle of the map whose cells (of the layers with `structures`) sort and fade as one thing, standing with
+/// its bottom left cell at (`x`, `y`), so it covers rows `y + 1 - h ..= y`.
+pub struct Structure {
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
 }
 
 /// An invisible spot on the map the game reacts to.
@@ -138,6 +158,8 @@ pub struct Level {
     /// Tile layers, bottom to top.
     pub layers: Vec<Layer>,
     pub sprites: Vec<Sprite>,
+    /// At most 255; where two overlap, the later one has the cells.
+    pub structures: Vec<Structure>,
     /// `w * h` bytes: 1 where a tile or a sprite's footprint blocks.
     pub solid: Vec<u8>,
     pub events: Vec<Event>,
@@ -146,10 +168,11 @@ pub struct Level {
 }
 
 // Blob, all little-endian, strings are a u32 byte length then UTF-8:
-//   w, h, tileset count, layer count, sprite count, event count, node count (u32 each)
+//   w, h, tileset count, layer count, sprite count, structure count, event count, node count (u32 each)
 //   tilesets: name (string), kind u32 (0 autotile, 1 tiles, 2 sprites)
-//   layers: tileset u32, over u32, then w * h cell bytes
+//   layers: tileset u32, over u32, structures u32, then w * h cell bytes
 //   sprites: tileset, col, row, w, h, x, y (u32 each)
+//   structures: x, y, w, h (u32 each)
 //   events: x, y, tag u32 (0 = script: start u32; 1 = goto: x u32, y u32, map string)
 //   nodes: tag u32 (0 = say: next u32, text; 1 = ask: text, option count u32, options: then u32, label)
 //   w * h solid flags; row 0 = the top of the map
@@ -176,7 +199,8 @@ impl Level {
         let mut r = Reader(b);
         let (w, h) = (r.u32()?, r.u32()?);
         let n = (w as usize).checked_mul(h as usize)?;
-        let (nt, nl, ns, ne, nn) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+        let (nt, nl, ns, nb) = (r.u32()?, r.u32()?, r.u32()?, r.u32()?);
+        let (ne, nn) = (r.u32()?, r.u32()?);
         let mut tilesets = Vec::new();
         for _ in 0..nt {
             let name = r.str()?;
@@ -193,6 +217,7 @@ impl Level {
             layers.push(Layer {
                 tileset: r.u32()?,
                 over: r.u32()? != 0,
+                structures: r.u32()? != 0,
                 cells: r.take(n)?.to_vec(),
             });
         }
@@ -206,6 +231,15 @@ impl Level {
                 h: r.u32()?,
                 x: r.u32()?,
                 y: r.u32()?,
+            });
+        }
+        let mut structures = Vec::new();
+        for _ in 0..nb {
+            structures.push(Structure {
+                x: r.u32()?,
+                y: r.u32()?,
+                w: r.u32()?,
+                h: r.u32()?,
             });
         }
         let mut events = Vec::new();
@@ -252,19 +286,19 @@ impl Level {
         // everything that points somewhere must point at something, so using a level never panics
         let kind_of = |t: u32| tilesets.get(t as usize).map(|t| t.kind);
         let ok = |i: u32| i == END || (i as usize) < nodes.len();
+        let fits = |x: u32, y: u32, sw: u32, sh: u32| {
+            sw > 0 && sh > 0 && x.saturating_add(sw) <= w && y < h && y + 1 >= sh
+        };
         let valid = w > 0
             && h > 0
+            && structures.len() <= 255
+            && structures.iter().all(|s| fits(s.x, s.y, s.w, s.h))
             && layers
                 .iter()
                 .all(|l| matches!(kind_of(l.tileset), Some(Kind::Autotile | Kind::Tiles)))
-            && sprites.iter().all(|s| {
-                kind_of(s.tileset) == Some(Kind::Sprites)
-                    && s.w > 0
-                    && s.h > 0
-                    && s.x + s.w <= w
-                    && s.y < h
-                    && s.y + 1 >= s.h
-            })
+            && sprites
+                .iter()
+                .all(|s| kind_of(s.tileset) == Some(Kind::Sprites) && fits(s.x, s.y, s.w, s.h))
             && events.iter().all(|e| {
                 e.x < w && e.y < h && !matches!(e.action, Action::Script { start } if !ok(start))
             })
@@ -278,6 +312,7 @@ impl Level {
             tilesets,
             layers,
             sprites,
+            structures,
             solid,
             events,
             nodes,

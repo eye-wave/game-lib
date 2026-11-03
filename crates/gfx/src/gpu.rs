@@ -286,12 +286,14 @@ pub(crate) unsafe fn make_buffer(
 }
 
 /// Triangle-list graphics pipeline with a `vs_main` / `fs_main` module, used by scene materials and the post pass.
+#[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn build_pipeline(
     c: &Ctx,
     layout: vk::PipelineLayout,
     spv: &'static Align4<[u8]>,
     format: vk::Format,
     depth: bool,
+    blend: bool,
     samples: vk::SampleCountFlags,
     vertex_input: &vk::PipelineVertexInputStateCreateInfo,
 ) -> vk::Pipeline {
@@ -317,12 +319,19 @@ pub(crate) unsafe fn build_pipeline(
         .front_face(vk::FrontFace::CLOCKWISE)
         .line_width(1.0);
     // alpha to coverage: a fragment's alpha becomes the share of samples it covers (smooth MSDF text edges, no
-    // sorting; opaque materials output alpha 1 and are unaffected)
+    // sorting; opaque materials output alpha 1 and are unaffected). Blending materials use their alpha for that.
     let multisample = vk::PipelineMultisampleStateCreateInfo::default()
         .rasterization_samples(samples)
-        .alpha_to_coverage_enable(samples != vk::SampleCountFlags::TYPE_1);
+        .alpha_to_coverage_enable(samples != vk::SampleCountFlags::TYPE_1 && !blend);
     let blend_att = [vk::PipelineColorBlendAttachmentState::default()
-        .color_write_mask(vk::ColorComponentFlags::RGBA)];
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
+        .blend_enable(blend)
+        .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
+        .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .color_blend_op(vk::BlendOp::ADD)
+        .src_alpha_blend_factor(vk::BlendFactor::ONE)
+        .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+        .alpha_blend_op(vk::BlendOp::ADD)];
     let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend_att);
     let dyn_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
     let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyn_states);

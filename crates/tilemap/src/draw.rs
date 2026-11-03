@@ -1,8 +1,9 @@
-//! Turns a `Level` into things gfx draws: a quad per tile layer (a material with the sheet and the layer's cells as
-//! textures), an instance per sprite. `prepare` creates the GPU resources, once per level; `spawn` creates the
+//! Turns a `Level` into things gfx draws: a quad per tile layer (a material with the sheet, the layer's cells and
+//! which structure owns each cell as textures), an instance per sprite, and per structure an instance of each
+//! layer's material over its rectangle. Everything that fades has a blending twin material. `prepare` creates the GPU resources, once per level; `spawn` creates the
 //! entities, as often as the level is entered.
 use crate::{Kind, Level};
-use alloc::{string::String, vec::Vec};
+use alloc::{string::String, vec, vec::Vec};
 use ecs::{Entity, World};
 use errors::prelude::*;
 use gfx::{Assets, Color, Handle, Material, Mesh, TexFormat, Texture, Transform, vk};
@@ -20,6 +21,8 @@ const LAYER_STEP: f32 = 0.01;
 const SORT_Z: f32 = 2.0;
 const SORT_STEP: f32 = 0.01; // per world unit of y: maps up to 100 rows tall sort correctly
 const OVER_Z: f32 = 3.0;
+const STRUCT_LAYER_STEP: f32 = 0.0001; // between a structure's layers: 100 layers stay under a row's SORT_STEP
+const FADE_TIME: f32 = 0.25; // seconds for `see_through` to fade out, and back in
 
 /// The z for something standing at world y `y` (its feet, or a sprite's bottom edge) among the sprites: the lower on
 /// the screen, the more in front. Give the parts of one figure small offsets (a thousandth) on top of this.
@@ -69,41 +72,63 @@ fn sheet(w: &mut World, name: &str) -> Handle<Texture> {
     t
 }
 
-struct SpriteDraw {
-    material: Handle<Material>,
+/// Component on what fades (sprites, structures): its opaque material and the blending twin it wears while
+/// see-through. The opacity is `Color.0[2]`.
+#[derive(Clone, Copy)]
+struct Fades(Handle<Material>, Handle<Material>);
+
+/// A quad of the level: where it goes, and its `Color` as the shader wants it.
+struct Draw {
+    mats: Fades,
     pos: Vec3,
     scale: Vec3,
-    src: [f32; 3], // the sheet cell and fade, as the shader wants them in `Color`
+    tint: [f32; 3],
 }
 
 /// A level's GPU side: materials, and where everything goes. Not tied to a `World` borrow, so it can sit in a
 /// resource and be handed to `spawn`.
 pub struct Prepared {
     size: (u32, u32),
-    layers: Vec<(Handle<Material>, f32)>, // material, z
-    sprites: Vec<SpriteDraw>,
+    layers: Vec<(Handle<Material>, f32, bool)>, // material, z, has structures
+    sprites: Vec<Draw>,
+    structures: Vec<Draw>, // one per structure and layer with structures
 }
 
 fn make_material(
     w: &mut World,
     shader: &'static Align4<[u8]>,
     textures: &[Handle<Texture>],
-) -> Handle<Material> {
-    let m = Material::new(
-        shader,
-        size_of::<[f32; 3]>() as u32,
-        &[vk::Format::R32G32B32_SFLOAT],
-    );
-    w.resource_mut::<Assets<Material>>()
-        .unwrap()
-        .add(m.with_textures(textures))
+) -> Fades {
+    let m = || {
+        Material::new(
+            shader,
+            size_of::<[f32; 3]>() as u32,
+            &[vk::Format::R32G32B32_SFLOAT],
+        )
+        .with_textures(textures)
+    };
+    let mats = w.resource_mut::<Assets<Material>>().unwrap();
+    Fades(mats.add(m()), mats.add(Material { blend: true, ..m() }))
 }
 
 /// Loads the level's image files (through `Sheets`), uploads its layers' cells and builds the materials. The
 /// textures reach the GPU the first frame they are drawn.
 pub fn prepare(w: &mut World, level: &Level) -> Prepared {
     let sheets: Vec<_> = level.tilesets.iter().map(|t| sheet(w, &t.name)).collect();
-    let mut layers = Vec::new();
+    let (lw, lh) = (level.w as usize, level.h as usize);
+    let mut owner = vec![0u8; lw * lh]; // which structure has each cell, + 1
+    for (i, s) in level.structures.iter().enumerate() {
+        for row in (s.y + 1 - s.h) as usize..=s.y as usize {
+            owner[row * lw + s.x as usize..][..s.w as usize].fill(i as u8 + 1);
+        }
+    }
+    let owner = w.resource_mut::<Assets<Texture>>().unwrap().add(Texture {
+        w: level.w,
+        h: level.h,
+        format: TexFormat::R8,
+        px: owner,
+    });
+    let (mut layers, mut structures) = (Vec::new(), Vec::new());
     for (i, l) in level.layers.iter().enumerate() {
         let shader = match level.tilesets[l.tileset as usize].kind {
             Kind::Autotile => AUTOTILE,
@@ -115,13 +140,27 @@ pub fn prepare(w: &mut World, level: &Level) -> Prepared {
             format: TexFormat::R8,
             px: l.cells.clone(),
         });
-        let m = make_material(w, shader, &[sheets[l.tileset as usize], cells]);
-        layers.push((m, i as f32 * LAYER_STEP + if l.over { OVER_Z } else { 0.0 }));
+        let mats = make_material(w, shader, &[sheets[l.tileset as usize], cells, owner]);
+        let z = i as f32 * LAYER_STEP + if l.over { OVER_Z } else { 0.0 };
+        layers.push((mats.0, z, l.structures));
+        if !l.structures {
+            continue;
+        }
+        for (k, s) in level.structures.iter().enumerate() {
+            let (pos, scale) = place(level, s.x, s.y, s.w, s.h);
+            structures.push(Draw {
+                mats,
+                // its layers in order, all well within one row's step
+                pos: Vec3::new(pos.x, pos.y, pos.z + i as f32 * STRUCT_LAYER_STEP),
+                scale,
+                tint: [k as f32 + 1.0, 1.0, 1.0],
+            });
+        }
     }
-    let mut mats: Vec<(u32, Handle<Material>)> = Vec::new(); // one material per sprite sheet
+    let mut mats: Vec<(u32, Fades)> = Vec::new(); // one pair per sprite sheet
     let mut sprites = Vec::new();
     for s in &level.sprites {
-        let material = match mats.iter().find(|m| m.0 == s.tileset) {
+        let m = match mats.iter().find(|m| m.0 == s.tileset) {
             Some(m) => m.1,
             None => {
                 let m = make_material(w, SPRITES, &[sheets[s.tileset as usize]]);
@@ -129,27 +168,37 @@ pub fn prepare(w: &mut World, level: &Level) -> Prepared {
                 m
             }
         };
-        let base = (level.h - 1 - s.y) as f32; // world y of its bottom edge; world y is up, rows go down
-        let (sw, sh) = (s.w as f32, s.h as f32);
-        sprites.push(SpriteDraw {
-            material,
-            pos: Vec3::new(s.x as f32 + sw / 2.0, base + sh / 2.0, depth(base)),
-            scale: Vec3::new(sw, sh, 1.0),
-            src: [s.col as f32, s.row as f32, 0.0],
+        let (pos, scale) = place(level, s.x, s.y, s.w, s.h);
+        sprites.push(Draw {
+            mats: m,
+            pos,
+            scale,
+            tint: [s.col as f32, s.row as f32, 1.0],
         });
     }
     Prepared {
         size: (level.w, level.h),
         layers,
         sprites,
+        structures,
     }
+}
+
+/// Center (z: its depth) and size of a `w` x `h` cell rectangle whose bottom left cell is (`x`, `y`).
+fn place(level: &Level, x: u32, y: u32, w: u32, h: u32) -> (Vec3, Vec3) {
+    let base = (level.h - 1 - y) as f32; // world y of its bottom edge; world y is up, rows go down
+    let (w, h) = (w as f32, h as f32);
+    (
+        Vec3::new(x as f32 + w / 2.0, base + h / 2.0, depth(base)),
+        Vec3::new(w, h, 1.0),
+    )
 }
 
 struct Quad(Handle<Mesh>); // the one unit square everything uses
 
-/// Spawns the level: a quad per tile layer and an entity per sprite. A cell is one world unit, the map's bottom left
-/// corner is the origin and its top row is at the top (world y up). Pairs with `Camera2d`. Despawn the returned
-/// entities to leave the level.
+/// Spawns the level: a quad per tile layer, an entity per sprite, and per structure one per layer that has
+/// structures. A cell is one world unit, the map's bottom left corner is the origin and its top row is at the top
+/// (world y up). Pairs with `Camera2d`. Despawn the returned entities to leave the level.
 pub fn spawn(w: &mut World, p: &Prepared) -> Vec<Entity> {
     if w.resource::<Quad>().is_none() {
         let v = Vec3::new;
@@ -166,38 +215,49 @@ pub fn spawn(w: &mut World, p: &Prepared) -> Vec<Entity> {
     let quad = w.resource::<Quad>().unwrap().0;
     let (mw, mh) = (p.size.0 as f32, p.size.1 as f32);
     let mut out = Vec::new();
-    for &(material, z) in &p.layers {
+    for &(material, z, structures) in &p.layers {
         let t = Transform {
             scale: Vec3::new(mw, mh, 1.0),
             ..Transform::from_pos(mw / 2.0, mh / 2.0, z)
         };
-        out.push(w.spawn_with((t, quad, material)));
+        // structure 0: the cells no structure has
+        let tint = Color([0.0, structures as u32 as f32, 1.0]);
+        out.push(w.spawn_with((t, quad, material, tint)));
     }
-    for s in &p.sprites {
+    for d in p.sprites.iter().chain(&p.structures) {
         let t = Transform {
-            scale: s.scale,
-            ..Transform::from_pos(s.pos.x, s.pos.y, s.pos.z)
+            scale: d.scale,
+            ..Transform::from_pos(d.pos.x, d.pos.y, d.pos.z)
         };
-        out.push(w.spawn_with((t, quad, s.material, Color(s.src))));
+        out.push(w.spawn_with((t, quad, d.mats.0, Color(d.tint), d.mats)));
     }
     out
 }
 
-/// Makes every sprite among `entities` (what `spawn` returned) that hides part of a figure see-through: `fade` of
-/// its pixels (0..1) are dropped, so the figure shows. A figure is the box `size` wide and tall standing on `feet`
-/// (world units); it is behind a sprite when its feet are above the sprite's bottom edge. Others go back to opaque.
-/// Call it every frame, after the figure moved.
-pub fn see_through(w: &mut World, entities: &[Entity], feet: Vec2, size: Vec2, fade: f32) {
-    for &e in entities {
-        let Some(t) = w.get::<Transform>(e) else { continue };
+/// Fades the sprites and structures that hide part of a figure to `opacity` (0..1), and the others back to opaque,
+/// over `FADE_TIME` seconds. A figure is `width` wide, centered on `feet` (world units); it is behind something
+/// when its feet are inside it, above its bottom edge. Call it every frame, after the figure moved.
+pub fn see_through(w: &mut World, feet: Vec2, width: f32, opacity: f32, dt: f32) {
+    let step = dt * (1.0 - opacity) / FADE_TIME;
+    for e in w.query_of::<(Fades, Transform, Color)>() {
+        let t = w.get::<Transform>(e).unwrap();
         let (lo, hi) = (t.pos - t.scale / 2.0, t.pos + t.scale / 2.0);
         let hides = feet.y > lo.y
-            && feet.y < hi.y + size.y // ...and the box overlaps the sprite
-            && feet.x + size.x / 2.0 > lo.x
-            && feet.x - size.x / 2.0 < hi.x;
-        if let Some(c) = w.get_mut::<Color>(e) {
-            c.0[2] = if hides { fade } else { 0.0 }; // tile layers have no `Color`
-        }
+            && feet.y < hi.y
+            && feet.x + width / 2.0 > lo.x
+            && feet.x - width / 2.0 < hi.x;
+        let goal = if hides { opacity } else { 1.0 };
+        let a = &mut w.get_mut::<Color>(e).unwrap().0[2];
+        *a = if *a < goal {
+            if *a + step < goal { *a + step } else { goal } // (no libm f32::min here)
+        } else if *a - step > goal {
+            *a - step
+        } else {
+            goal
+        };
+        let opaque = *a >= 1.0;
+        let m = *w.get::<Fades>(e).unwrap();
+        *w.get_mut::<Handle<Material>>(e).unwrap() = if opaque { m.0 } else { m.1 };
     }
 }
 

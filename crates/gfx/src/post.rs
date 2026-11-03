@@ -217,6 +217,7 @@ impl Post {
                     shader,
                     sc.format,
                     false,
+                    false,
                     vk::SampleCountFlags::TYPE_1,
                     &vk::PipelineVertexInputStateCreateInfo::default(),
                 );

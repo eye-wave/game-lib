@@ -65,6 +65,10 @@ pub struct Material {
     /// Images the fragment shader reads (feature `textures`, at most 4): texture `k` is
     /// `@group(0) @binding(k) var t: texture_2d<f32>`, and `@group(0) @binding(4)` is a linear clamp sampler.
     pub textures: Vec<Handle<Texture>>,
+    /// See-through: the fragment's alpha blends it over what is behind (straight alpha). Blending materials draw
+    /// after every opaque one and still write depth, so put only what is see-through right now on them (swap the
+    /// entity's material back when it is opaque again).
+    pub blend: bool,
 }
 impl Material {
     pub const fn new(
@@ -77,6 +81,7 @@ impl Material {
             stride,
             attrs,
             textures: Vec::new(),
+            blend: false,
         }
     }
     pub fn with_textures(mut self, textures: &[Handle<Texture>]) -> Self {

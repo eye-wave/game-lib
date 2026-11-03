@@ -45,8 +45,8 @@ const BOX_MIN: f32 = 112.0; // its least height: 4 lines + padding; it grows for
 const INDENT: f32 = 2.0; // ems before an answer, room for the marker
 const GAP: f32 = 16.0; // box to screen edge, and text to box edge
 const HALF: Vec2 = Vec2::new(0.28, 0.14); // half size of the feet box, tiles
-const BODY: Vec2 = Vec2::new(0.5, 0.8); // the hero's drawn size, tiles (see `person`)
-const SEE_THROUGH: f32 = 0.4; // share of a sprite's pixels dropped while it hides the hero
+const BODY_W: f32 = 0.5; // the hero's drawn width, tiles (see `person`)
+const SEE_THROUGH: f32 = 0.6; // opacity of a sprite or structure while it hides the hero
 
 /// A script node's text, laid out once: question or line first, then the answers, all in one mesh (the engine
 /// draws only a few distinct meshes per frame).
@@ -608,8 +608,7 @@ fn view(w: &mut World, dt: f32) {
         t.pos.y = feet.y + off.y;
         t.pos.z = tilemap::depth(feet.y) + z; // behind what is below it, in front of what is above
     }
-    let ents = w.resource::<Maps>().unwrap().entities.clone();
-    tilemap::see_through(w, &ents, hero, BODY, SEE_THROUGH);
+    tilemap::see_through(w, hero, BODY_W, SEE_THROUGH, dt);
 }
 
 fn game() {

@@ -10,7 +10,21 @@ struct Source {
     textures: Vec<TextureSrc>,
     layers: Vec<LayerSrc>,
     #[serde(default)]
+    structures: Vec<StructureSrc>,
+    #[serde(default)]
     events: Vec<EventSrc>,
+}
+
+/// A building or such: bottom left cell (`x`, `y` from the top) and `size` in cells, like a sprite. `solid`
+/// blocks its bottom row.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StructureSrc {
+    x: u32,
+    y: u32,
+    size: [u32; 2],
+    #[serde(default)]
+    solid: bool,
 }
 
 /// An image file (by name in the assets directory) and what it is used as.
@@ -39,6 +53,8 @@ struct LayerSrc {
     legend: HashMap<char, Entry>,
     rows: Vec<String>,
     empty: Option<char>,
+    #[serde(default)]
+    structures: bool, // tile layers: its cells inside a structure belong to that structure
 }
 
 /// `kind` for autotile layers; `tile` (and `size` for sprites) for the others.
@@ -262,9 +278,25 @@ pub fn bake(json: &str) -> Result<Vec<u8>, String> {
             }
         }
         if t.kind != KindSrc::Sprites {
-            layers.push((l.texture as u32, over, cells));
+            layers.push((l.texture as u32, over, l.structures, cells));
+        } else if l.structures {
+            return Err(format!("{name}: `structures` is for tile layers"));
         } else {
             over = true;
+        }
+    }
+    if src.structures.len() > 255 {
+        return Err("`structures`: at most 255".into());
+    }
+    for (i, s) in src.structures.iter().enumerate() {
+        let ([sw, sh], x, y) = (s.size, s.x as usize, s.y as usize);
+        if sw == 0 || sh == 0 || x + sw as usize > w || y >= h || y + 1 < sh as usize {
+            return Err(format!(
+                "structures[{i}]: a {sw} x {sh} structure at column {x}, row {y} does not fit on the map"
+            ));
+        }
+        if s.solid {
+            solid[y * w + x..y * w + x + sw as usize].fill(1);
         }
     }
 
@@ -300,6 +332,7 @@ pub fn bake(json: &str) -> Result<Vec<u8>, String> {
         src.textures.len(),
         layers.len(),
         sprites.len(),
+        src.structures.len(),
         events.len(),
         nodes.len(),
     ] {
@@ -309,15 +342,21 @@ pub fn bake(json: &str) -> Result<Vec<u8>, String> {
         put_str(&mut out, &t.name);
         put(&mut out, t.kind as u32);
     }
-    for (tex, over, cells) in &layers {
+    for (tex, over, structures, cells) in &layers {
         put(&mut out, *tex);
         put(&mut out, *over as u32);
+        put(&mut out, *structures as u32);
         out.extend(cells);
     }
     for (tex, d) in &sprites {
         put(&mut out, *tex);
         for v in d {
             put(&mut out, *v);
+        }
+    }
+    for s in &src.structures {
+        for v in [s.x, s.y, s.size[0], s.size[1]] {
+            put(&mut out, v);
         }
     }
     for e in &events {
@@ -368,7 +407,8 @@ mod tests {
       "layers": [
         { "texture": 0, "legend": { "g": { "kind": 0 }, "b": { "kind": 4, "solid": true } }, "rows": ["gbg", "bbg"] },
         { "texture": 1, "legend": { "T": { "tile": [5, 11], "size": [1, 2], "solid": true } }, "rows": ["...", ".T."] },
-        { "texture": 2, "legend": { "r": { "tile": [0, 4] } }, "rows": ["r..", "..."] } ],
+        { "texture": 2, "legend": { "r": { "tile": [0, 4] } }, "rows": ["r..", "..."], "structures": true } ],
+      "structures": [ { "x": 0, "y": 1, "size": [1, 2], "solid": true } ],
       "events": [
         { "x": 1, "y": 0, "script": [
             { "say": "hi" },
@@ -396,7 +436,11 @@ mod tests {
         assert_eq!(lv.sprites.len(), 1);
         let s = &lv.sprites[0];
         assert_eq!((s.col, s.row, s.w, s.h, s.x, s.y), (5, 11, 1, 2, 1, 1));
-        assert_eq!(lv.solid, [0, 1, 0, 1, 1, 0]); // the bushes; the sprite's base (1, 1) is one of those cells
+        assert!(!lv.layers[0].structures && lv.layers[1].structures);
+        let b = &lv.structures[0];
+        assert_eq!((b.x, b.y, b.w, b.h), (0, 1, 1, 2));
+        // the bushes; the sprite's base (1, 1) is one of those cells, the structure's (0, 1) too
+        assert_eq!(lv.solid, [0, 1, 0, 1, 1, 0]);
         assert!(lv.solid_at(1, 0) && !lv.solid_at(0, 0) && lv.solid_at(-1, 0) && lv.solid_at(3, 0));
         assert_eq!(lv.events.len(), 2);
         let (script, door) = (&lv.events[0], &lv.events[1]);
@@ -427,5 +471,7 @@ mod tests {
         ); // off the map
         assert!(bake(&ok.replace("\"rows\": [\"gg\"]", "\"rows\": [\"gx\"]")).is_err()); // `x` is not in the legend
         assert!(bake(&ok.replace("\"kind\": 0", "\"tile\": [0, 0]")).is_err()); // a tile entry on an autotile layer
+        let off = r#", "structures": [ { "x": 1, "y": 0, "size": [2, 1] } ] }"#;
+        assert!(bake(&format!("{ok}{off}")).is_err()); // a structure past the map's edge
     }
 }

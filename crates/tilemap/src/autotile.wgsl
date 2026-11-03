@@ -3,23 +3,33 @@
 // row 0 = top of the map); the sheet is the RGBA A2 sheet (8 x 4 kinds, each 2 x 3 tiles of 48 px = 4 x 6
 // subtiles of 24 px). Per fragment: world position -> cell -> the 8 neighbours from the layer -> autotile shape
 // 0..46 -> FLOOR_AUTOTILE_TABLE gives the 4 subtiles -> textureLoad (no sampler: pixel art stays exact at any
-// zoom). Empty cells and see-through texels are discarded, so the layers below show; there is no blending.
-// The quad's vertices are -0.5..0.5, so uv 0..1 spans the map and the Transform scale decides the tile size.
+// zoom). Empty cells and see-through texels are discarded, so the layers below show; the alpha is the opacity
+// (`tint.z`, for a blending material). Cells are found from the world position (one unit per cell, the map's
+// bottom left corner at 0), so a quad can cover the whole map or only a structure's rectangle.
 struct VsIn {
     @location(0) pos: vec3<f32>,
     @location(4) a: vec4<f32>,    // x, y, z, angle
     @location(5) s: vec4<f32>,    // scale x, y
-    @location(6) tint: vec4<f32>, // unused
+    @location(6) tint: vec4<f32>, // (structure, has structures, opacity): see `owns`
 }
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>, // 0..1 across the map, v up
+    @location(0) world: vec2<f32>, // world units = cells, y up, the map's bottom left corner at 0
+    @location(1) @interpolate(flat) tint: vec3<f32>,
 }
 
 @group(0) @binding(0) var tileset: texture_2d<f32>;
 @group(0) @binding(1) var level: texture_2d<f32>;
+@group(0) @binding(2) var owner: texture_2d<f32>; // per cell: 0, or the structure index + 1
 var<immediate> vp: mat4x4<f32>;
+
+// The whole-map quad (tint.x = 0) draws the cells no structure owns, if the layer has structures (tint.y); a
+// structure's quad (tint.x = its index + 1, over its rectangle only) draws the ones it owns.
+fn owns(cell: vec2<i32>, tint: vec3<f32>) -> bool {
+    let o = textureLoad(owner, clamp(cell, vec2(0), vec2<i32>(textureDimensions(owner)) - 1), 0).r * 255.0;
+    return tint.y < 0.5 || abs(o - tint.x) < 0.5;
+}
 
 @vertex
 fn vs_main(v: VsIn) -> VsOut {
@@ -28,7 +38,8 @@ fn vs_main(v: VsIn) -> VsOut {
     let p = v.pos.xy * v.s.xy;
     var out: VsOut;
     out.pos = vp * vec4<f32>(p.x * c - p.y * s + v.a.x, p.x * s + p.y * c + v.a.y, v.pos.z + v.a.z, 1.0);
-    out.uv = v.pos.xy + 0.5;
+    out.world = vec2<f32>(p.x * c - p.y * s + v.a.x, p.x * s + p.y * c + v.a.y);
+    out.tint = v.tint.rgb;
     return out;
 }
 
@@ -103,16 +114,16 @@ fn tile_px(kind: u32, sh: u32, p: vec2<i32>) -> vec4<f32> {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let dims = vec2<i32>(textureDimensions(level));
     // cell units from the map's top-left (v is up in the quad, rows go down in the layer), then whole pixels
-    let w = vec2(in.uv.x, 1.0 - in.uv.y) * vec2<f32>(dims);
+    let w = vec2(in.world.x, f32(dims.y) - in.world.y);
     let cell = vec2<i32>(floor(w));
     let p = vec2<i32>(floor(fract(w) * f32(TILE)));
     let v = kind_at(cell); // kind + 1; neighbours are compared by it, so empty counts as a kind of its own
-    if v == 0u {
+    if v == 0u || !owns(cell, in.tint) {
         discard;
     }
     let t = tile_px(v - 1u, shape(cell, v), p);
     if t.a < 0.5 {
         discard;
     }
-    return vec4<f32>(t.rgb, 1.0);
+    return vec4<f32>(t.rgb, in.tint.z);
 }
