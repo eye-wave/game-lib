@@ -19,7 +19,7 @@
 //! | `lit`         | `Vertex`, `Material::lit`                                                             | bring your own `Material` |
 //! | `aa`          | 4x MSAA of the scene pass (3D edges and `Material::msdf` text)                      | jagged edges |
 //! | `textures`    | `Texture`, `Material::textures`: images a material's fragment shader reads            | `Material::textures` is ignored |
-//! | `text`        | `Atlas`, `Material::msdf` (draws the `font` crate's text meshes)                      | no `Atlas` |
+//! | `text`        | `Atlas`, `Material::msdf` (draws `media::Font`'s text meshes)                      | no `Atlas` |
 #![no_std]
 #![allow(unsafe_op_in_unsafe_fn)]
 

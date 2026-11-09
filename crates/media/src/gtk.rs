@@ -99,7 +99,7 @@ impl View {
             gtk_container_add(win, view);
             gtk_widget_show_all(win);
             let mut html = Vec::new();
-            for s in [web::POST, web::PAGE, web::END] {
+            for s in [web::POST, &web::page(), web::END] {
                 html.extend_from_slice(s.as_bytes());
             }
             html.push(0);
@@ -118,11 +118,9 @@ impl View {
     }
 
     /// Start decoding `payload` (yEnc byte values); the answer comes back through `inbox`.
-    pub fn run(&mut self, id: usize, sound: bool, payload: &[u8]) {
+    pub fn run(&mut self, id: usize, kind: char, payload: &[u8]) {
         let mut js = Vec::with_capacity(payload.len() * 3 / 2 + 32);
-        js.extend_from_slice(
-            alloc::format!("go({id},\"{}\",\"", if sound { 'a' } else { 'i' }).as_bytes(),
-        );
+        js.extend_from_slice(alloc::format!("go({id},\"{kind}\",\"").as_bytes());
         for &c in payload {
             push_utf8(c, &mut js);
         }

@@ -5,7 +5,7 @@
 //! A level is assets/<name>.json in this app (it names its own image files), baked by build.rs (`tilemap::build`) into the workspace
 //! assets/<name>.level and loaded at runtime like the images: ground kinds and object cells as two small textures,
 //! plus invisible events (Z to talk, or step on a door to change map). Dialogue is a pixel font
-//! (assets/pixel.png + pixel.json, as in bitmap-font-example) on flat quads that `view` pins to the bottom of the
+//! (assets/pixel.png, as in bitmap-font-example) on flat quads that `view` pins to the bottom of the
 //! screen in whole screen pixels, whatever the zoom. The fade is a post-process shader (src/fade.wgsl).
 #![no_std]
 #![no_main]
@@ -66,6 +66,7 @@ struct Maps {
     list: Vec<Map>,
     cur: usize,
     entities: Vec<Entity>, // what the current map spawned: layers and sprites
+    font: Rc<media::Font>, // the dialogue font, a grid in pixel.png
 }
 struct Talk {
     at: Option<(u32, usize)>, // (node, picked answer)
@@ -151,7 +152,7 @@ fn add_map(w: &mut World, name: &str) -> usize {
     }
     let level = tilemap::load(name);
     let drawn = Rc::new(tilemap::prepare(w, &level));
-    let font = font::include_font!("pixel");
+    let font = w.resource::<Maps>().unwrap().font.clone();
     // every node's text, laid out once; answers start on their own lines, indented
     let views = level
         .nodes
@@ -222,18 +223,19 @@ fn person(w: &mut World, ui: Ui, at: Vec2, body: [f32; 3], hair: [f32; 3]) {
 
 fn setup(w: &mut World, _: f32) {
     w.insert_resource(Sheets::new(load_sheet));
+    let img = media::load_image("pixel.png").unwrap_or_else(|e| die(e));
     w.insert_resource(Maps {
         list: Vec::new(),
         cur: 0,
         entities: Vec::new(),
+        font: Rc::new(media::Font::new(&img, media::ASCII, 1)), // 10 px cells, 8 px glyphs
     });
 
-    let img = media::load_image("pixel.png").unwrap_or_else(|e| die(e));
-    // a bitmap font has no pixels of its own: every channel is the PNG's alpha
+    // every channel is the PNG's alpha
     w.insert_resource(Atlas {
         w: img.w,
         h: img.h,
-        rgb: font::alpha_atlas(&img.rgba).leak(),
+        rgb: media::alpha_atlas(&img.rgba).leak(),
         nearest: true,
     });
     let quad = w.resource_mut::<Assets<Mesh>>().unwrap().add(quad_mesh());

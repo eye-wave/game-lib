@@ -1,6 +1,6 @@
-//! Bitmap font: `assets/pixel.json` (BMFont-style metadata, baked into the binary by build.rs) lays the text out,
-//! `assets/pixel.png` (Press Start 2P at 8 px, SIL OFL, see assets/pixel-OFL.txt) is loaded at runtime as the atlas.
-//! Same one-mesh-per-color trick as `font-example`.
+//! Bitmap font: `assets/pixel.png` (Press Start 2P at 8 px, SIL OFL; a 16-column grid of the ASCII characters) is both the
+//! atlas and, through `media::Font`, the layout.
+//! One mesh per color.
 #![no_std]
 #![no_main]
 
@@ -20,8 +20,8 @@ const SIZE: f32 = 0.5; // one em (8 atlas px) in world units: 1 px = 0.1, a whol
 const WRAP: f32 = 14.0;
 
 fn setup(w: &mut World, _: f32) {
-    let font = font::include_font!("pixel");
     let img = media::load_image("pixel.png").unwrap_or_else(|e| die(e));
+    let font = media::Font::new(&img, media::ASCII, 1); // 16 x 6 cells of 10 px, 1 px padding around each 8 px glyph
 
     let mut verts: [Vec<[f32; 5]>; 3] = Default::default();
     let mut pen = [0.0, 0.0];
@@ -34,11 +34,11 @@ fn setup(w: &mut World, _: f32) {
         font.push_word(&mut verts[color], &mut pen, word, SIZE, WRAP);
     }
 
-    // a bitmap font has no pixels of its own: every channel is the PNG's alpha
+    // every channel is the PNG's alpha
     w.insert_resource(Atlas {
         w: img.w,
         h: img.h,
-        rgb: font::alpha_atlas(&img.rgba).leak(),
+        rgb: media::alpha_atlas(&img.rgba).leak(),
         nearest: true,
     });
     let material = w

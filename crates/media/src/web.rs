@@ -5,65 +5,57 @@
 //! (`ready` once, when its script has run). Payloads are yEnc: byte+42, with NUL LF CR `=` `"` `<` `\` escaped as
 //! `=` + (byte+64). Every JS char is one byte value 0..=255; each backend maps that to its transport's text
 //! encoding (UTF-8 on GTK, UTF-16 on WebView2). Everything the page sends is re-checked here.
-use crate::{Clip, Image, MAX, MAX_SAMPLES};
-use alloc::vec::Vec;
+#[cfg(feature = "audio")]
+use crate::{Clip, MAX_SAMPLES};
+#[cfg(feature = "image")]
+use crate::{Image, MAX};
+use alloc::{string::String, vec::Vec};
 
 /// Backend-specific: how the page sends a string to the host.
 #[cfg(unix)]
-pub const POST: &str = "<script>const post = m => webkit.messageHandlers.ipc.postMessage(m);";
+pub const POST: &str = "<script>const post=m=>webkit.messageHandlers.ipc.postMessage(m);";
 #[cfg(windows)]
-pub const POST: &str = "<script>const post = m => chrome.webview.postMessage(m);";
+pub const POST: &str = "<script>const post=m=>chrome.webview.postMessage(m);";
 
 // 4096 below is `MAX`: an oversize image is refused before its pixels are shipped. Decode failures post `error`.
-pub const PAGE: &str = r#"
-const yenc = u => { let s = "", a = [];
-  for (let k = 0; k < u.length; k++) {
-    let c = (u[k] + 42) & 255;
-    if (c == 0 || c == 10 || c == 13 || c == 34 || c == 60 || c == 61 || c == 92) { a.push(61); c = (c + 64) & 255; }
-    a.push(c);
-    if (a.length >= 32768) { s += String.fromCharCode.apply(null, a); a = []; }
-  }
-  return s + String.fromCharCode.apply(null, a); };
-const un = s => { const o = new Uint8Array(s.length); let j = 0;
-  for (let i = 0; i < s.length; i++) {
-    let c = s.charCodeAt(i);
-    if (c == 61) c = s.charCodeAt(++i) - 64;
-    o[j++] = c - 42;
-  }
-  return o.slice(0, j); };
-const img = (id, D) => {
-  const i = new Image();
-  i.onerror = () => post(id + ":error");
-  i.onload = () => {
-    const w = i.naturalWidth, h = i.naturalHeight;
-    if (w > 4096 || h > 4096) return post(id + ":error");
-    const c = new OffscreenCanvas(w, h), x = c.getContext("2d");
-    x.drawImage(i, 0, 0);
-    post(id + ":img:" + w + ":" + h + ":" + yenc(x.getImageData(0, 0, w, h).data));
-  };
-  i.src = URL.createObjectURL(new Blob([un(D)]));
-};
-// Offline context: no audio device. decodeAudioData resamples to the context rate (48 kHz).
-const aud = (id, D) => new OfflineAudioContext(2, 1, 48000).decodeAudioData(un(D).buffer)
-  .then(a => {
-    const n = a.length, ch = a.numberOfChannels, f = new Float32Array(n * ch);
-    for (let c = 0; c < ch; c++) f.set(a.getChannelData(c), c * n);
-    post(id + ":audio:" + ch + ":" + a.sampleRate + ":" + yenc(new Uint8Array(f.buffer)));
-  }).catch(() => post(id + ":error"));
-"#;
+const COMMON: &str = r#"const T={},yenc=l=>{let r="",n=[];for(let t=0;t<l.length;t++){let e=l[t]+42&255;0!=e&&10!=e&&13!=e&&34!=e&&60!=e&&61!=e&&92!=e||(n.push(61),e=e+64&255),n.push(e),32768<=n.length&&(r+=String.fromCharCode.apply(null,n),n=[])}return r+String.fromCharCode.apply(null,n)},un=l=>{var r=new Uint8Array(l.length);let n=0;for(let t=0;t<l.length;t++){let e=l.charCodeAt(t);61==e&&(e=l.charCodeAt(++t)-64),r[n++]=e-42}return r.slice(0,n)};"#;
+
+#[cfg(feature = "image")]
+const IMG: &str = r#"T.i=(t,e)=>{const n=new Image;n.onerror=()=>post(t+":error"),n.onload=()=>{var e=n.naturalWidth,r=n.naturalHeight;if(4096<e||4096<r)return post(t+":error");var a=new OffscreenCanvas(e,r).getContext("2d");a.drawImage(n,0,0),post(t+":img:"+e+":"+r+":"+yenc(a.getImageData(0,0,e,r).data))},n.src=URL.createObjectURL(new Blob([un(e)]))};"#;
+
+#[cfg(feature = "audio")]
+const AUD: &str = r#"T.a=(e,a)=>new OfflineAudioContext(2,1,48e3).decodeAudioData(un(a).buffer).then(a=>{var n=a.length,t=a.numberOfChannels,r=new Float32Array(n*t);for(let e=0;e<t;e++)r.set(a.getChannelData(e),e*n);post(e+":audio:"+t+":"+a.sampleRate+":"+yenc(new Uint8Array(r.buffer)))}).catch(()=>post(e+":error"));"#;
+
+#[cfg(feature = "font")]
+const FNT: &str = r#"T.f=async(a,n)=>{try{var o=un(n);let e=0,t=0;for(;t<2;)10==o[e++]&&t++;var[f,c]=(new TextDecoder).decode(o.slice(0,e)).split("\n"),l=[...c],i=new FontFace("f",o.slice(e).buffer);await i.load(),document.fonts.add(i);const s=new OffscreenCanvas(1,1),h=s.getContext("2d",{willReadFrequently:!0}),x=(h.font=f+"px f",h.measureText("Mg")),g=x.fontBoundingBoxAscent,u=Math.ceil(Math.max(...l.map(e=>h.measureText(e).width))),w=Math.ceil(g+x.fontBoundingBoxDescent);var r=16*u,d=w*Math.ceil(l.length/16);if(4096<r||4096<d)throw 0;s.width=r,s.height=d,h.font=f+"px f",h.fillStyle="\#fff",l.forEach((e,t)=>h.fillText(e,t%16*u,Math.floor(t/16)*w+g)),post(a+":img:"+r+":"+d+":"+yenc(h.getImageData(0,0,r,d).data))}catch(e){post(a+":error")}};"#;
+
+const GO: &str = r#"const go=(o,r,s)=>T[r]?T[r](o,s):post(o+":error");"#;
+
+/// The page script: the shared helpers plus the decoders of the enabled features.
+pub fn page() -> String {
+    let parts = [
+        COMMON,
+        #[cfg(feature = "image")]
+        IMG,
+        #[cfg(feature = "audio")]
+        AUD,
+        #[cfg(feature = "font")]
+        FNT,
+        GO,
+    ];
+    parts.concat()
+}
 
 /// Closes the page's script and, on WebView2 (where the host sends jobs as messages), listens for them.
 #[cfg(unix)]
 pub const END: &str = "post(\"ready\");</script>";
 #[cfg(windows)]
-pub const END: &str = r#"chrome.webview.addEventListener("message", e => {
-  const m = e.data, i = m.indexOf(":"), j = m.indexOf(":", i + 1);
-  go(+m.slice(0, i), m.slice(i + 1, j), m.slice(j + 1));
-});
-post("ready");</script>"#;
+pub const END: &str = r#"chrome.webview.addEventListener("message",e=>{var e=e.data,i=e.indexOf(":"),s=e.indexOf(":",i+1);go(+e.slice(0,i),e.slice(i+1,s),e.slice(s+1))}),post("ready");</script>"#;
 
 pub enum Decoded {
+    #[cfg(feature = "image")]
     Image(Image),
+    #[cfg(feature = "audio")]
     Clip(Clip),
 }
 
@@ -119,6 +111,7 @@ fn parse(mut s: &[u8]) -> Option<Decoded> {
     let b = num(field(&mut s))?;
     let data = yenc_decode(s);
     match tag {
+        #[cfg(feature = "image")]
         b"img" => ((1..=MAX).contains(&a)
             && (1..=MAX).contains(&b)
             && data.len() == a as usize * b as usize * 4)
@@ -127,6 +120,7 @@ fn parse(mut s: &[u8]) -> Option<Decoded> {
                 h: b,
                 rgba: data,
             })),
+        #[cfg(feature = "audio")]
         b"audio" => {
             let f: Vec<f32> = data
                 .as_chunks::<4>()
@@ -185,7 +179,7 @@ pub fn yenc_decode(s: &[u8]) -> Vec<u8> {
     out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "image", feature = "audio"))]
 mod tests {
     extern crate std;
     use super::*;

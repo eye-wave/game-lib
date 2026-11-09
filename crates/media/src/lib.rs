@@ -9,15 +9,22 @@
 //! `Loader::wait` and `load_image`, which are for tools and tests. Call everything from one thread that owns the
 //! GTK main context / has a message loop (your main thread). The webview lives only while something is queued.
 //!
+//! Text: `Loader::font` has the webview draw a TTF/OTF/WOFF into a glyph grid image; a pixel font is just such an image
+//! already. `Font` (see `font.rs`) lays text out from the grid in plain Rust.
+//!
 //! Images come out as 8-bit RGBA (straight alpha, top row first), sounds as mono 16-bit PCM at 48 kHz (the rate
 //! `audio` plays at, and it mixes everything down to mono anyway).
 #![no_std]
 extern crate alloc;
 
+#[cfg(feature = "font")]
+mod font;
 #[cfg_attr(unix, path = "gtk.rs")]
 #[cfg_attr(windows, path = "webview2.rs")]
 mod sys;
 mod web;
+#[cfg(feature = "font")]
+pub use font::{ASCII, COLS, Font, alpha_atlas};
 
 use alloc::{string::String, vec::Vec};
 use core::ffi::CStr;
@@ -26,18 +33,22 @@ use sys::View;
 use web::{Decoded, State, yenc_encode};
 
 /// Larger images are rejected before their pixels are sent over.
+#[cfg(feature = "image")]
 const MAX: u32 = 4096;
 /// Clips are decoded whole: 32M samples is about 11 minutes at 48 kHz mono. Stream longer music instead.
+#[cfg(feature = "audio")]
 const MAX_SAMPLES: usize = 1 << 25;
 /// Files being decoded at once; the rest of the queue stays `Pending`.
 const MAX_RUNNING: usize = 4;
 
+#[cfg(feature = "image")]
 pub struct Image {
     pub w: u32,
     pub h: u32,
     pub rgba: Vec<u8>,
 }
 
+#[cfg(feature = "image")]
 impl Image {
     pub fn px(&self, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * self.w + x) * 4) as usize;
@@ -51,12 +62,14 @@ impl Image {
 }
 
 /// Equal `cw` x `ch` cells numbered left to right, top to bottom.
+#[cfg(feature = "image")]
 pub struct Grid {
     pub cw: u32,
     pub ch: u32,
     pub cols: u32,
 }
 
+#[cfg(feature = "image")]
 impl Grid {
     pub fn new(img: &Image, cw: u32, ch: u32) -> Self {
         Self {
@@ -72,6 +85,7 @@ impl Grid {
 }
 
 /// Interleaved 16-bit PCM: frame `i` is `pcm[i * channels..][..channels]`.
+#[cfg(feature = "audio")]
 pub struct Clip {
     pub rate: u32,
     pub channels: u32,
@@ -94,7 +108,9 @@ pub struct Id(usize);
 enum Slot {
     Pending,
     Loading,
+    #[cfg(feature = "image")]
     Image(Image),
+    #[cfg(feature = "audio")]
     Clip(Clip),
     Taken,
     Failed(&'static CStr),
@@ -102,7 +118,8 @@ enum Slot {
 
 struct Job {
     name: String,
-    sound: bool,
+    kind: char,   // `i`mage, `a`udio or `f`ont: what the page's `go` takes
+    head: String, // `f` only: `<px>\n<chars>\n`, sent before the file
     slot: Slot,
 }
 
@@ -117,20 +134,32 @@ impl Loader {
         Self::default()
     }
 
+    #[cfg(feature = "image")]
     /// Queue `name` from the assets directory as an image (any format the webview reads; only the first frame).
     pub fn image(&mut self, name: &str) -> Id {
-        self.queue(name, false)
+        self.queue(name, 'i')
     }
 
+    #[cfg(feature = "audio")]
     /// Queue `name` from the assets directory as a sound (any format the webview reads).
     pub fn sound(&mut self, name: &str) -> Id {
-        self.queue(name, true)
+        self.queue(name, 'a')
     }
 
-    fn queue(&mut self, name: &str, sound: bool) -> Id {
+    #[cfg(feature = "font")]
+    /// Queue the font file `name` (TTF, OTF, WOFF) to be drawn by the webview, `px` tall, into a glyph grid image for
+    /// `Font::new(&img, chars, 0)`: take it with `take_image`. `chars` must not contain a newline.
+    pub fn font(&mut self, name: &str, chars: &str, px: u32) -> Id {
+        let id = self.queue(name, 'f');
+        self.jobs[id.0].head = alloc::format!("{px}\n{chars}\n");
+        id
+    }
+
+    fn queue(&mut self, name: &str, kind: char) -> Id {
         self.jobs.push(Job {
             name: name.into(),
-            sound,
+            kind,
+            head: String::new(),
             slot: Slot::Pending,
         });
         Id(self.jobs.len() - 1)
@@ -156,10 +185,13 @@ impl Loader {
                 .get_mut(id)
                 .filter(|j| matches!(j.slot, Slot::Loading))
             {
-                job.slot = match (d, job.sound) {
-                    (Some(Decoded::Image(i)), false) => Slot::Image(i),
-                    (Some(Decoded::Clip(c)), true) => Slot::Clip(c),
-                    _ if job.sound => Slot::Failed(AUDIO_DECODE_FAILED),
+                job.slot = match (d, job.kind) {
+                    #[cfg(feature = "image")]
+                    (Some(Decoded::Image(i)), 'i' | 'f') => Slot::Image(i),
+                    #[cfg(feature = "audio")]
+                    (Some(Decoded::Clip(c)), 'a') => Slot::Clip(c),
+                    #[cfg(feature = "audio")]
+                    (_, 'a') => Slot::Failed(AUDIO_DECODE_FAILED),
                     _ => Slot::Failed(IMAGE_DECODE_FAILED),
                 };
             }
@@ -184,8 +216,9 @@ impl Loader {
             job.slot = match platform::read_asset(&job.name) {
                 Some(file) => {
                     let mut payload = Vec::with_capacity(file.len() + file.len() / 16);
+                    yenc_encode(job.head.as_bytes(), &mut payload);
                     yenc_encode(&file, &mut payload);
-                    view.run(id, job.sound, &payload);
+                    view.run(id, job.kind, &payload);
                     running += 1;
                     Slot::Loading
                 }
@@ -245,6 +278,7 @@ impl Loader {
     }
 
     /// The image, once it is `Ready`; it can be taken once. `None` for anything else, including a sound's id.
+    #[cfg(feature = "image")]
     pub fn take_image(&mut self, id: Id) -> Option<Image> {
         match core::mem::replace(&mut self.jobs[id.0].slot, Slot::Taken) {
             Slot::Image(i) => Some(i),
@@ -256,6 +290,7 @@ impl Loader {
     }
 
     /// The sound, once it is `Ready`; it can be taken once. `None` for anything else, including an image's id.
+    #[cfg(feature = "audio")]
     pub fn take_clip(&mut self, id: Id) -> Option<Clip> {
         match core::mem::replace(&mut self.jobs[id.0].slot, Slot::Taken) {
             Slot::Clip(c) => Some(c),
@@ -276,6 +311,7 @@ impl Loader {
     }
 }
 
+#[cfg(feature = "image")]
 /// Blocking one-off: queue, wait, take. For programs with nothing to show while they load.
 pub fn load_image(name: &str) -> Result<Image, &'static CStr> {
     let mut l = Loader::new();
@@ -285,7 +321,7 @@ pub fn load_image(name: &str) -> Result<Image, &'static CStr> {
         .ok_or(l.failed().unwrap_or(IMAGE_DECODE_FAILED))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "image", feature = "audio", feature = "font"))]
 mod tests {
     extern crate std;
     use super::*;
@@ -305,6 +341,7 @@ mod tests {
             l.sound("blip.ogg"),
             l.sound("blip.mp3"),
         ];
+        let grid = l.font("ComicMono.ttf", ASCII, 32); // drawn by the page: 16 cells a row, 6 rows
         let missing = l.image("nope.png");
         let not_an_image = l.image("blip.wav");
         assert!(l.status(missing) == Status::Pending && l.progress() == 0.0 && !l.done());
@@ -322,6 +359,8 @@ mod tests {
         assert!(l.status(missing) == Status::Failed(READ_FILE_FAILED));
         assert!(l.status(not_an_image) == Status::Failed(IMAGE_DECODE_FAILED));
 
+        let g = l.take_image(grid).unwrap();
+        assert!(g.w % COLS == 0 && g.h % 6 == 0 && g.rgba.chunks(4).any(|p| p[3] > 200));
         let png = l.take_image(imgs[0]).unwrap();
         assert_eq!((png.w, png.h), (168, 24));
         let g = Grid::new(&png, 24, 24);

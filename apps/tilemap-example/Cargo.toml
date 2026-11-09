@@ -1,3 +1,4 @@
+
 [package]
 name = "tilemap-example"
 version = "0.1.0"
@@ -5,7 +6,6 @@ edition = "2024"
 
 [dependencies]
 ecs = { path = "../../crates/ecs" }
-font = { path = "../../crates/font" } # runtime half only: lays the dialogue text out
 gfx = { path = "../../crates/gfx", default-features = false, features = [
   "cam2d",
   "mouse", # Input::window_size
@@ -20,6 +20,7 @@ tilemap = { path = "../../crates/tilemap" }
 
 [build-dependencies]
 shader = { path = "../../crates/shader", features = ["build"] }
-font = { path = "../../crates/font", features = ["bitmap"] } # bakes assets/pixel.json
-tilemap = { path = "../../crates/tilemap", default-features = false, features = ["build"] } # bakes assets/level.txt
+tilemap = { path = "../../crates/tilemap", default-features = false, features = [
+  "build",
+] } # bakes assets/level.txt
 win32-sys = { path = "../../crates/win32-sys", features = ["build"] }

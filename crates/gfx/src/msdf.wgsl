@@ -1,4 +1,4 @@
-// Built-in material for `Material::msdf()`: text meshes of `x, y, z, u, v` vertices (the `font` crate's layout),
+// Built-in material for `Material::msdf()`: text meshes of `x, y, z, u, v` vertices (the `media` crate's layout),
 // filled with the instance's `Color` (white when absent). Same instance contract as flat.wgsl; the atlas is
 // group 0 (binding 0 = the MSDF, binding 4 = a linear clamp sampler).
 struct VsIn {

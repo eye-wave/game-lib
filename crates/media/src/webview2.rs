@@ -160,8 +160,8 @@ impl View {
     }
 
     /// Start decoding `payload` (yEnc byte values); the answer comes back through `inbox`. Only when `Ready`.
-    pub fn run(&mut self, id: usize, sound: bool, payload: &[u8]) {
-        let mut m: Vec<u16> = alloc::format!("{id}:{}:", if sound { 'a' } else { 'i' })
+    pub fn run(&mut self, id: usize, kind: char, payload: &[u8]) {
+        let mut m: Vec<u16> = alloc::format!("{id}:{kind}:")
             .bytes()
             .map(u16::from)
             .collect();
@@ -220,7 +220,7 @@ unsafe extern "system" fn invoke(this: P, a: usize, b: P) -> Hr {
                     (&raw mut s.h[2]).cast(),
                     &mut s.token,
                 );
-                let mut html: Vec<u16> = [web::POST, web::PAGE, web::END]
+                let mut html: Vec<u16> = [web::POST, &web::page(), web::END]
                     .iter()
                     .flat_map(|p| p.bytes())
                     .map(u16::from)

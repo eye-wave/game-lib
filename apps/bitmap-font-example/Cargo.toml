@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 ecs = { path = "../../crates/ecs" }
-font = { path = "../../crates/font" } # no features at runtime: stays `no_std`
 gfx = { path = "../../crates/gfx", default-features = false, features = [
   "cam2d",
   "text",
@@ -15,5 +14,4 @@ media = { path = "../../crates/media" }
 platform = { path = "../../crates/platform", features = ["rt"] }
 
 [build-dependencies]
-font = { path = "../../crates/font", features = ["bitmap"] } # `bitmap` and `build` are exclusive, hence its own app
 win32-sys = { path = "../../crates/win32-sys", features = ["build"] }

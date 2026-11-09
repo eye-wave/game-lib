@@ -3,6 +3,14 @@ name = "media"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = ["image", "audio", "font"]
+# what the hidden page can decode (each adds its script part; off = no `Loader::image` / `sound` / `font`).
+# `font` draws a TTF/OTF/WOFF into a glyph grid and brings `Font` (layout from any grid image, e.g. a pixel font's PNG).
+image = []
+audio = []
+font = ["image"] # the grid comes back as an `Image`
+
 [dependencies]
 errors = { path = "../errors" }
 platform = { path = "../platform" }
