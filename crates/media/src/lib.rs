@@ -30,7 +30,7 @@ use alloc::{string::String, vec::Vec};
 use core::ffi::CStr;
 use errors::assets::*;
 use sys::View;
-use web::{Decoded, State, yenc_encode};
+use web::{Decoded, State, escape};
 
 /// Larger images are rejected before their pixels are sent over.
 #[cfg(feature = "image")]
@@ -166,7 +166,7 @@ impl Loader {
     }
 
     /// Call once per frame: runs the webview's pending events, files away what it finished, and starts pending
-    /// assets while there is room. Reading a file for a new asset is the only blocking part.
+    /// assets while there is room. Nothing blocks: the page fetches the files from the host as it goes.
     pub fn poll(&mut self) {
         if self.done() {
             return;
@@ -196,6 +196,15 @@ impl Loader {
                 };
             }
         }
+        for id in core::mem::take(&mut view.inbox.missing) {
+            if let Some(job) = self
+                .jobs
+                .get_mut(id)
+                .filter(|j| matches!(j.slot, Slot::Loading))
+            {
+                job.slot = Slot::Failed(READ_FILE_FAILED);
+            }
+        }
         match view.inbox.state {
             State::Dead => return self.fail_all(WEBVIEW_UNAVAILABLE),
             State::Starting => return,
@@ -213,17 +222,9 @@ impl Loader {
             if !matches!(job.slot, Slot::Pending) {
                 continue;
             }
-            job.slot = match platform::read_asset(&job.name) {
-                Some(file) => {
-                    let mut payload = Vec::with_capacity(file.len() + file.len() / 16);
-                    yenc_encode(job.head.as_bytes(), &mut payload);
-                    yenc_encode(&file, &mut payload);
-                    view.run(id, job.kind, &payload);
-                    running += 1;
-                    Slot::Loading
-                }
-                None => Slot::Failed(READ_FILE_FAILED),
-            };
+            view.run(id, job.kind, &escape(&job.name), &escape(&job.head)); // the page fetches the file itself
+            running += 1;
+            job.slot = Slot::Loading;
         }
         if self.done() {
             self.view = None; // frees the browser process; the next queued asset starts a new one

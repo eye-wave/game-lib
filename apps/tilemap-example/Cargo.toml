@@ -1,4 +1,3 @@
-
 [package]
 name = "tilemap-example"
 version = "0.1.0"
@@ -20,7 +19,5 @@ tilemap = { path = "../../crates/tilemap" }
 
 [build-dependencies]
 shader = { path = "../../crates/shader", features = ["build"] }
-tilemap = { path = "../../crates/tilemap", default-features = false, features = [
-  "build",
-] } # bakes assets/level.txt
+tilemap = { path = "../../crates/tilemap", default-features = false, features = ["build"] } # bakes assets/level.txt
 win32-sys = { path = "../../crates/win32-sys", features = ["build"] }
