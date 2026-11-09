@@ -26,21 +26,22 @@ pub const POST: &str = "<script>var p=m=>webkit.messageHandlers.ipc.postMessage(
 #[cfg(windows)]
 pub const POST: &str = "<script>var p=m=>chrome.webview.postMessage(m),";
 
-// 4096 below is `MAX`: an oversize image is refused before its pixels are shipped. Failures post `error`, a missing
-// file `nofile`. The POST says text/plain so the browser sends it without a CORS preflight.
-const COMMON: &str = r#"T={},n="N",x=":E",G=async(t,e)=>{if(!(e=await fetch(B+"a/"+e)).ok)throw n;return p(t+":s2"),e.blob()},reply=(t,e,o,r,a)=>(p(t+":s3"),fetch(B+"r/"+t+"/"+e+"/"+o+"/"+r,{method:"POST",body:a,headers:{"content-type":"text/plain"}}).catch(()=>p(t+x))),fail=(t,e)=>p(t+(n==e?":"+n:x)),g=(o,s,r,t)=>(p(o+":s1"),T[s]?T[s](o,r,t):p(o+":E")),"#;
+// Failures post `error`, a missing file `nofile`. The POST has no headers (a typed-array body sends no content type),
+// so the browser sends it without a CORS preflight. Sizes are checked on the host (`decode`, `MAX`); the page sends
+// no progress messages, so a timeout always reads `WEBVIEW_TIMEOUT_NO_JOB`.
+const COMMON: &str = r#"T={},n="N",G=async(t,e)=>{if(!(e=await fetch(B+"a/"+e)).ok)throw n;return e.blob()},R=(t,e,o,r,a)=>fetch(B+"r/"+t+"/"+e+"/"+o+"/"+r,{method:"POST",body:a}),g=async(o,s,r,t)=>{try{await T[s](o,r,t)}catch(a){p(o+(a==n?":N":":E"))}};"#;
 
 #[cfg(feature = "image")]
-const IMG: &str = r#"S=4096;T.i=async(e,a)=>{try{var i=new Image,c=URL.createObjectURL(await G(e,a));await new Promise((a,e)=>{i.onload=a,i.onerror=e,i.src=c});var t=i.naturalWidth,r=i.naturalHeight;if(S<t||S<r)throw 0;var n=new OffscreenCanvas(t,r).getContext("2d");n.drawImage(i,0,0),reply(e,"img",t,r,n.getImageData(0,0,t,r).data)}catch(a){fail(e,a)}};"#;
+const IMG: &str = r#"I=(e,c,w,h)=>R(e,"img",w,h,c.getImageData(0,0,w,h).data);T.i=async(e,a)=>{var i=await createImageBitmap(await G(e,a)),t=i.width,r=i.height;var n=new OffscreenCanvas(t,r).getContext("2d");n.drawImage(i,0,0),await I(e,n,t,r)};"#;
 
 #[cfg(feature = "audio")]
 // Offline context: no audio device. decodeAudioData resamples to the context rate (48 kHz).
-const AUD: &str = r#"T.a=async(e,a)=>{try{var t=await new OfflineAudioContext(2,1,48e3).decodeAudioData(await(await G(e,a)).arrayBuffer()),n=t.length,r=t.numberOfChannels,f=new Float32Array(n*r);for(a=0;a<r;a++)f.set(t.getChannelData(a),a*n);reply(e,"audio",r,t.sampleRate,new Uint8Array(f.buffer))}catch(a){fail(e,a)}};"#;
+const AUD: &str = r#"T.a=async(e,a)=>{var t=await new OfflineAudioContext(2,1,48e3).decodeAudioData(await(await G(e,a)).arrayBuffer()),n=t.length,r=t.numberOfChannels,f=new Float32Array(n*r);for(a=0;a<r;a++)f.set(t.getChannelData(a),a*n);await R(e,"audio",r,t.sampleRate,new Uint8Array(f.buffer))};"#;
 
 #[cfg(feature = "font")]
 // Font file -> glyph grid image (reply `img`). `head` is `<px>\n<chars>\n`; the grid has 16 cells per row
 // (font.rs `COLS`), each as wide as the widest glyph and as tall as the font's ascent + descent.
-const FNT: &str = r#"T.f=async(e,t,a)=>{try{var[n,o]=decodeURIComponent(a).split("\n"),f=[...o],i=new FontFace("f",await(await G(e,t)).arrayBuffer());await i.load(),document.fonts.add(i);const h=new OffscreenCanvas(1,1),r=h.getContext("2d",{willReadFrequently:!0}),d=(r.font=n+"px f",r.measureText("Mg")),g=d.fontBoundingBoxAscent,s=Math.ceil(Math.max(...f.map(t=>r.measureText(t).width))),w=Math.ceil(g+d.fontBoundingBoxDescent);var l=16*s,c=w*((f.length+15)/16|0);if(S<l||S<c)throw 0;h.width=l,h.height=c,r.font=n+"px f",r.fillStyle="\#fff",f.forEach((t,e)=>r.fillText(t,e%16*s,Math.floor(e/16)*w+g)),reply(e,"img",l,c,r.getImageData(0,0,l,c).data)}catch(t){fail(e,t)}};"#;
+const FNT: &str = r#"T.f=async(e,t,a)=>{var[n,o]=decodeURIComponent(a).split("\n"),f=[...o],i=new FontFace("f",await(await G(e,t)).arrayBuffer());await i.load(),document.fonts.add(i);const h=new OffscreenCanvas(1,1),r=h.getContext("2d",{willReadFrequently:!0}),d=(r.font=n+"px f",r.measureText("Mg")),g=d.fontBoundingBoxAscent,s=Math.ceil(Math.max(...f.map(t=>r.measureText(t).width))),w=Math.ceil(g+d.fontBoundingBoxDescent);var l=16*s,c=w*((f.length+15)/16|0);h.width=l,h.height=c,r.font=n+"px f",r.fillStyle="\#fff",f.forEach((t,e)=>r.fillText(t,e%16*s,Math.floor(e/16)*w+g)),await I(e,r,l,c)};"#;
 
 /// The page script: `BASE`, the shared helpers plus the decoders of the enabled features.
 pub fn page() -> String {
