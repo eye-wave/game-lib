@@ -1,30 +1,36 @@
-//! Image and sound loading through one spawned `ffmpeg` process per file, so no decoder lives in the binary and any
-//! format ffmpeg knows works. ffmpeg must be on PATH (`FFMPEG_MISSING` otherwise). Errors are `die`-ready codes.
+//! Image and sound loading through one hidden webview (WebKitGTK on Linux, WebView2 on Windows), so no decoder lives
+//! in the binary and any format the system browser engine knows works. Linux needs a display, libgtk-3 and
+//! libwebkit2gtk-4.1; Windows needs the WebView2 Runtime and `WebView2Loader.dll` next to the exe (`WEBVIEW_UNAVAILABLE`
+//! otherwise). Errors are `die`-ready codes.
 //!
 //! `Loader` is the asset system: queue files, call `poll` once per frame, read `progress`/`status`, `take` what is
-//! ready. An asset is `Pending` (queued, waiting for a free slot: at most `MAX_RUNNING` ffmpegs at a time),
-//! `Loading` (ffmpeg running, its output being collected), then `Ready` or `Failed(code)`. Nothing blocks except
-//! `Loader::wait` and `load_image`, which are for tools and tests.
+//! ready. An asset is `Pending` (queued, waiting for the webview to start or for a free slot: at most `MAX_RUNNING`
+//! decodes at a time), `Loading` (the webview is decoding it), then `Ready` or `Failed(code)`. Nothing blocks except
+//! `Loader::wait` and `load_image`, which are for tools and tests. Call everything from one thread that owns the
+//! GTK main context / has a message loop (your main thread). The webview lives only while something is queued.
 //!
-//! Images come out as 8-bit RGBA (straight alpha, top row first, ffmpeg's PAM output), sounds as mono 16-bit PCM at
-//! 48 kHz (the rate `audio` plays at, and it mixes everything down to mono anyway).
+//! Images come out as 8-bit RGBA (straight alpha, top row first), sounds as mono 16-bit PCM at 48 kHz (the rate
+//! `audio` plays at, and it mixes everything down to mono anyway).
 #![no_std]
 extern crate alloc;
 
-use alloc::vec::Vec;
+#[cfg_attr(unix, path = "gtk.rs")]
+#[cfg_attr(windows, path = "webview2.rs")]
+mod sys;
+mod web;
+
+use alloc::{string::String, vec::Vec};
 use core::ffi::CStr;
 use errors::assets::*;
-use platform::{Child, Read};
+use sys::View;
+use web::{Decoded, State, yenc_encode};
 
-/// Larger images are rejected as soon as the header is read, before the pixels are collected.
+/// Larger images are rejected before their pixels are sent over.
 const MAX: u32 = 4096;
 /// Clips are decoded whole: 32M samples is about 11 minutes at 48 kHz mono. Stream longer music instead.
 const MAX_SAMPLES: usize = 1 << 25;
-/// ffmpeg processes alive at once; the rest of the queue stays `Pending`.
+/// Files being decoded at once; the rest of the queue stays `Pending`.
 const MAX_RUNNING: usize = 4;
-/// Bytes read from one ffmpeg per `poll` at most, so a big asset cannot stall a frame.
-const READ_PER_POLL: usize = 1 << 20;
-const RATE: u32 = 48_000;
 
 pub struct Image {
     pub w: u32,
@@ -87,12 +93,7 @@ pub struct Id(usize);
 
 enum Slot {
     Pending,
-    /// `buf` is everything ffmpeg has written so far; `want` is the size it must reach (0 = not known yet).
-    Loading {
-        child: Child,
-        buf: Vec<u8>,
-        want: usize,
-    },
+    Loading,
     Image(Image),
     Clip(Clip),
     Taken,
@@ -100,60 +101,115 @@ enum Slot {
 }
 
 struct Job {
-    path: Vec<u8>, // NUL-terminated
+    name: String,
     sound: bool,
     slot: Slot,
 }
 
 #[derive(Default)]
-pub struct Loader(Vec<Job>);
+pub struct Loader {
+    jobs: Vec<Job>,
+    view: Option<View>,
+}
 
 impl Loader {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Queue `name` from the assets directory as an image (any format ffmpeg reads; only the first frame).
+    /// Queue `name` from the assets directory as an image (any format the webview reads; only the first frame).
     pub fn image(&mut self, name: &str) -> Id {
         self.queue(name, false)
     }
 
-    /// Queue `name` from the assets directory as a sound (any format ffmpeg reads; a video's audio track works too).
+    /// Queue `name` from the assets directory as a sound (any format the webview reads).
     pub fn sound(&mut self, name: &str) -> Id {
         self.queue(name, true)
     }
 
     fn queue(&mut self, name: &str, sound: bool) -> Id {
-        self.0.push(Job {
-            path: platform::asset_path(name),
+        self.jobs.push(Job {
+            name: name.into(),
             sound,
             slot: Slot::Pending,
         });
-        Id(self.0.len() - 1)
+        Id(self.jobs.len() - 1)
     }
 
-    /// Call once per frame: starts pending assets while there is room, and collects what the running ones wrote.
+    /// Call once per frame: runs the webview's pending events, files away what it finished, and starts pending
+    /// assets while there is room. Reading a file for a new asset is the only blocking part.
     pub fn poll(&mut self) {
+        if self.done() {
+            return;
+        }
+        if self.view.is_none() {
+            self.view = View::new();
+        }
+        let Some(view) = &mut self.view else {
+            return self.fail_all(WEBVIEW_UNAVAILABLE);
+        };
+        view.pump();
+        for (id, d) in core::mem::take(&mut view.inbox.done) {
+            // an id the page made up, or a second answer for one job, is ignored
+            if let Some(job) = self
+                .jobs
+                .get_mut(id)
+                .filter(|j| matches!(j.slot, Slot::Loading))
+            {
+                job.slot = match (d, job.sound) {
+                    (Some(Decoded::Image(i)), false) => Slot::Image(i),
+                    (Some(Decoded::Clip(c)), true) => Slot::Clip(c),
+                    _ if job.sound => Slot::Failed(AUDIO_DECODE_FAILED),
+                    _ => Slot::Failed(IMAGE_DECODE_FAILED),
+                };
+            }
+        }
+        match view.inbox.state {
+            State::Dead => return self.fail_all(WEBVIEW_UNAVAILABLE),
+            State::Starting => return,
+            State::Ready => {}
+        }
         let mut running = self
-            .0
+            .jobs
             .iter()
-            .filter(|j| matches!(j.slot, Slot::Loading { .. }))
+            .filter(|j| matches!(j.slot, Slot::Loading))
             .count();
-        for job in &mut self.0 {
-            if matches!(job.slot, Slot::Pending) && running < MAX_RUNNING {
-                job.start();
-                running += matches!(job.slot, Slot::Loading { .. }) as usize;
+        for (id, job) in self.jobs.iter_mut().enumerate() {
+            if running >= MAX_RUNNING {
+                break;
             }
-            if matches!(job.slot, Slot::Loading { .. }) {
-                job.pump();
+            if !matches!(job.slot, Slot::Pending) {
+                continue;
             }
+            job.slot = match platform::read_asset(&job.name) {
+                Some(file) => {
+                    let mut payload = Vec::with_capacity(file.len() + file.len() / 16);
+                    yenc_encode(&file, &mut payload);
+                    view.run(id, job.sound, &payload);
+                    running += 1;
+                    Slot::Loading
+                }
+                None => Slot::Failed(READ_FILE_FAILED),
+            };
+        }
+        if self.done() {
+            self.view = None; // frees the browser process; the next queued asset starts a new one
         }
     }
 
+    fn fail_all(&mut self, e: &'static CStr) {
+        for j in &mut self.jobs {
+            if matches!(j.slot, Slot::Pending | Slot::Loading) {
+                j.slot = Slot::Failed(e);
+            }
+        }
+        self.view = None;
+    }
+
     pub fn status(&self, id: Id) -> Status {
-        match self.0[id.0].slot {
+        match self.jobs[id.0].slot {
             Slot::Pending => Status::Pending,
-            Slot::Loading { .. } => Status::Loading,
+            Slot::Loading => Status::Loading,
             Slot::Failed(e) => Status::Failed(e),
             _ => Status::Ready,
         }
@@ -161,46 +217,39 @@ impl Loader {
 
     /// Nothing is `Pending` or `Loading` any more (everything is `Ready` or `Failed`). True for an empty loader.
     pub fn done(&self) -> bool {
-        self.0
+        self.jobs
             .iter()
-            .all(|j| !matches!(j.slot, Slot::Pending | Slot::Loading { .. }))
+            .all(|j| !matches!(j.slot, Slot::Pending | Slot::Loading))
     }
 
     /// First failure, if any asset failed.
     pub fn failed(&self) -> Option<&'static CStr> {
-        self.0.iter().find_map(|j| match j.slot {
+        self.jobs.iter().find_map(|j| match j.slot {
             Slot::Failed(e) => Some(e),
             _ => None,
         })
     }
 
-    /// 0..=1 over all queued assets: finished ones count fully, a running image counts by the pixels received so
-    /// far (a sound only counts once it is done: its length is not known up front). 1 for an empty loader.
+    /// 0..=1 over all queued assets: the share that is finished (an asset is all or nothing: the webview does not
+    /// report how far along a decode is). 1 for an empty loader.
     pub fn progress(&self) -> f32 {
-        if self.0.is_empty() {
+        if self.jobs.is_empty() {
             return 1.0;
         }
-        let sum: f32 = self
-            .0
+        let ready = self
+            .jobs
             .iter()
-            .map(|j| match &j.slot {
-                Slot::Pending => 0.0,
-                Slot::Loading { buf, want, .. } if *want > 0 => {
-                    buf.len() as f32 / *want as f32 * 0.99
-                }
-                Slot::Loading { .. } => 0.0,
-                _ => 1.0,
-            })
-            .sum();
-        sum / self.0.len() as f32
+            .filter(|j| !matches!(j.slot, Slot::Pending | Slot::Loading))
+            .count();
+        ready as f32 / self.jobs.len() as f32
     }
 
     /// The image, once it is `Ready`; it can be taken once. `None` for anything else, including a sound's id.
     pub fn take_image(&mut self, id: Id) -> Option<Image> {
-        match core::mem::replace(&mut self.0[id.0].slot, Slot::Taken) {
+        match core::mem::replace(&mut self.jobs[id.0].slot, Slot::Taken) {
             Slot::Image(i) => Some(i),
             other => {
-                self.0[id.0].slot = other;
+                self.jobs[id.0].slot = other;
                 None
             }
         }
@@ -208,16 +257,17 @@ impl Loader {
 
     /// The sound, once it is `Ready`; it can be taken once. `None` for anything else, including an image's id.
     pub fn take_clip(&mut self, id: Id) -> Option<Clip> {
-        match core::mem::replace(&mut self.0[id.0].slot, Slot::Taken) {
+        match core::mem::replace(&mut self.jobs[id.0].slot, Slot::Taken) {
             Slot::Clip(c) => Some(c),
             other => {
-                self.0[id.0].slot = other;
+                self.jobs[id.0].slot = other;
                 None
             }
         }
     }
 
     /// Blocks until everything is done. For tools and tests; a game polls from its frame loop instead.
+    // no timeout, a page that never answers hangs this. Count polls here if one ever does.
     pub fn wait(&mut self) {
         while !self.done() {
             self.poll();
@@ -235,137 +285,12 @@ pub fn load_image(name: &str) -> Result<Image, &'static CStr> {
         .ok_or(l.failed().unwrap_or(IMAGE_DECODE_FAILED))
 }
 
-impl Job {
-    fn start(&mut self) {
-        let Ok(path) = CStr::from_bytes_with_nul(&self.path) else {
-            self.slot = Slot::Failed(READ_FILE_FAILED); // a NUL inside the name
-            return;
-        };
-        let head = [c"ffmpeg", c"-nostdin", c"-v", c"error", c"-i", path];
-        let tail: &[&CStr] = if self.sound {
-            &[
-                c"-vn", c"-ac", c"1", c"-ar", c"48000", c"-f", c"s16le", c"-",
-            ]
-        } else {
-            &[
-                c"-frames:v",
-                c"1",
-                c"-an",
-                c"-pix_fmt",
-                c"rgba",
-                c"-c:v",
-                c"pam",
-                c"-f",
-                c"image2pipe",
-                c"-",
-            ]
-        };
-        let args: Vec<&CStr> = head.iter().chain(tail).copied().collect();
-        self.slot = match platform::spawn(&args) {
-            Some(child) => Slot::Loading {
-                child,
-                buf: Vec::new(),
-                want: 0,
-            },
-            None => Slot::Failed(FFMPEG_MISSING),
-        };
-    }
-
-    /// Read what ffmpeg has written (without blocking); finish the asset once its output ends.
-    fn pump(&mut self) {
-        let Slot::Loading { child, buf, want } = &mut self.slot else {
-            return;
-        };
-        let mut chunk = [0u8; 1 << 14];
-        let mut eof = false;
-        for _ in 0..READ_PER_POLL / chunk.len() {
-            match child.read(&mut chunk) {
-                Read::Data(n) => buf.extend_from_slice(&chunk[..n]),
-                Read::Empty => break,
-                Read::Eof => {
-                    eof = true;
-                    break;
-                }
-            }
-        }
-        let bad = if self.sound {
-            AUDIO_DECODE_FAILED
-        } else {
-            IMAGE_DECODE_FAILED
-        };
-        if !self.sound && *want == 0 {
-            match pam_header(buf) {
-                Ok(Some((hdr, w, h))) => *want = hdr + w as usize * h as usize * 4,
-                Ok(None) if !eof && buf.len() < 256 => {} // header not complete yet
-                _ => return self.slot = Slot::Failed(bad), // garbage, oversize, or no header at all
-            }
-        }
-        if (self.sound && buf.len() / 2 > MAX_SAMPLES) || (*want > 0 && buf.len() > *want) {
-            return self.slot = Slot::Failed(bad);
-        }
-        if !eof {
-            return;
-        }
-        let ok = child.wait();
-        let buf = core::mem::take(buf);
-        self.slot = match (ok, self.sound) {
-            (true, true) if buf.len() >= 2 => Slot::Clip(Clip {
-                rate: RATE,
-                channels: 1,
-                pcm: buf
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|b| i16::from_le_bytes(*b))
-                    .collect(),
-            }),
-            (true, false) if buf.len() == *want => {
-                let (hdr, w, h) = pam_header(&buf).ok().flatten().unwrap();
-                let mut rgba = buf;
-                drop(rgba.drain(..hdr));
-                Slot::Image(Image { w, h, rgba })
-            }
-            _ => Slot::Failed(bad),
-        };
-    }
-}
-
-/// `Ok(Some((header bytes, w, h)))` once the whole PAM header is in `b`, `Ok(None)` while it is incomplete, `Err`
-/// for anything that is not RGBA PAM within `MAX`.
-fn pam_header(b: &[u8]) -> Result<Option<(usize, u32, u32)>, ()> {
-    const END: &[u8] = b"ENDHDR\n";
-    let Some(end) = b.windows(END.len()).position(|w| w == END) else {
-        return Ok(None);
-    };
-    let hdr = end + END.len();
-    let text = core::str::from_utf8(&b[..end]).map_err(|_| ())?;
-    let mut lines = text.lines();
-    if lines.next() != Some("P7") {
-        return Err(());
-    }
-    let (mut w, mut h, mut depth) = (0, 0, 0);
-    for l in lines {
-        let (key, v) = l.split_once(' ').ok_or(())?;
-        let v = v.parse::<u32>().unwrap_or(0);
-        match key {
-            "WIDTH" => w = v,
-            "HEIGHT" => h = v,
-            "DEPTH" => depth = v,
-            _ => {}
-        }
-    }
-    if depth == 4 && (1..=MAX).contains(&w) && (1..=MAX).contains(&h) {
-        Ok(Some((hdr, w, h)))
-    } else {
-        Err(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     extern crate std;
     use super::*;
 
+    /// Needs the assets and a display (xvfb-run on a headless Linux box) or the WebView2 Runtime.
     #[test]
     fn loader_lifecycle() {
         let mut l = Loader::new();
@@ -384,13 +309,17 @@ mod tests {
         let not_an_image = l.image("blip.wav");
         assert!(l.status(missing) == Status::Pending && l.progress() == 0.0 && !l.done());
 
-        l.poll(); // 4 slots: the first four start, the rest wait their turn
-        assert!(l.status(imgs[0]) == Status::Loading && l.status(snds[1]) == Status::Pending);
+        while l.status(imgs[0]) == Status::Pending {
+            l.poll(); // the webview takes a moment to start
+            platform::sleep_ms(1);
+        }
+        // 4 slots: the first four started in the same poll, the rest wait their turn
+        assert!(l.status(snds[0]) == Status::Loading && l.status(snds[1]) == Status::Pending);
         assert!(l.status(not_an_image) == Status::Pending);
 
         l.wait();
-        assert!(l.done() && l.progress() == 1.0);
-        assert!(l.status(missing) == Status::Failed(IMAGE_DECODE_FAILED));
+        assert!(l.done() && l.progress() == 1.0 && l.view.is_none());
+        assert!(l.status(missing) == Status::Failed(READ_FILE_FAILED));
         assert!(l.status(not_an_image) == Status::Failed(IMAGE_DECODE_FAILED));
 
         let png = l.take_image(imgs[0]).unwrap();
@@ -411,15 +340,5 @@ mod tests {
             assert!(c.pcm.iter().any(|s| s.abs() > 1000));
         }
         assert!(l.take_image(imgs[0]).is_none() && l.status(imgs[0]) == Status::Ready); // taken once
-    }
-
-    #[test]
-    fn pam_header_cases() {
-        let ok = b"P7\nWIDTH 3\nHEIGHT 2\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n";
-        assert!(pam_header(ok) == Ok(Some((ok.len(), 3, 2))));
-        assert!(pam_header(&ok[..20]) == Ok(None));
-        assert!(pam_header(b"P7\nWIDTH 5000\nHEIGHT 2\nDEPTH 4\nENDHDR\n").is_err());
-        assert!(pam_header(b"P7\nWIDTH 3\nHEIGHT 2\nDEPTH 3\nENDHDR\n").is_err());
-        assert!(pam_header(b"nope\nENDHDR\n").is_err());
     }
 }

@@ -1,9 +1,9 @@
 //! Three buttons, each drawn from an image in a different format (PNG, JPEG, WebP). Pressing one plays a sound
 //! decoded from a different format (WAV, MP3, Ogg Vorbis). Each button dims while it is held.
 //! Like sprite-example, every image pixel is a 1x1 quad: no textures in gfx yet.
-//! Startup queues all six files in a `media::Loader` (ffmpeg decodes them in the background) and shows a black
+//! Startup queues all six files in a `media::Loader` (a hidden webview decodes them in the background) and shows a black
 //! screen with a loading bar drawn by `loading.wgsl`; the buttons appear once everything is `Ready`.
-//! A file that fails ends the program with its error code (703: ffmpeg missing, 702/704: bad image/sound).
+//! A file that fails ends the program with its error code (703: webview unavailable, 701: file missing, 702/704: bad image/sound).
 #![no_std]
 #![no_main]
 

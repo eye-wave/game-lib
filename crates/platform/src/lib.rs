@@ -33,15 +33,6 @@ fn rt_check() {}
 mod sys;
 pub use sys::*;
 
-/// What a non-blocking `Child::read` found.
-pub enum Read {
-    Data(usize),
-    /// Nothing right now; the process is still running.
-    Empty,
-    /// The process closed its stdout: call `Child::wait`.
-    Eof,
-}
-
 /// NUL-terminated path of asset `name`: `<workspace>/assets` in debug builds (found from the source tree, so any
 /// working directory does), `assets/` next to the executable in release builds (a bundle is the executables plus
 /// one `assets/` beside them).

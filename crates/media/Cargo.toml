@@ -6,3 +6,6 @@ edition = "2024"
 [dependencies]
 errors = { path = "../errors" }
 platform = { path = "../platform" }
+
+[target.'cfg(windows)'.dependencies]
+win32-sys = { path = "../win32-sys" }

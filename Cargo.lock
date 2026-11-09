@@ -285,6 +285,7 @@ version = "0.1.0"
 dependencies = [
  "errors",
  "platform",
+ "win32-sys",
 ]
 
 [[package]]
