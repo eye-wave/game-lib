@@ -234,6 +234,7 @@ fn setup(w: &mut World, _: f32) {
         w: img.w,
         h: img.h,
         rgb: font::alpha_atlas(&img.rgba).leak(),
+        nearest: true,
     });
     let quad = w.resource_mut::<Assets<Mesh>>().unwrap().add(quad_mesh());
     let mats = w.resource_mut::<Assets<Material>>().unwrap();

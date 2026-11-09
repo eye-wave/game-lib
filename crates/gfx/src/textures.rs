@@ -20,6 +20,8 @@ const MAX_SETS: u32 = 256; // materials with textures, plus the atlas
 pub(crate) struct Textures {
     layout: vk::DescriptorSetLayout,
     sampler: vk::Sampler,
+    #[cfg(feature = "text")]
+    nearest: vk::Sampler, // for bitmap-font atlases
     pool: vk::DescriptorPool,
     images: Vec<Option<Target>>, // by texture index, uploaded on first use
     sets: Vec<Option<vk::DescriptorSet>>, // by material index
@@ -48,19 +50,7 @@ impl Textures {
                 p,
             )
         });
-        let sampler: vk::Sampler = mk(CREATE_SAMPLER_FAILED, |p| {
-            vkCreateSampler(
-                c.device,
-                &vk::SamplerCreateInfo::default()
-                    .mag_filter(vk::Filter::LINEAR)
-                    .min_filter(vk::Filter::LINEAR)
-                    .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                    .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
-                NA,
-                p,
-            )
-        });
+        let sampler = make_sampler(c, vk::Filter::LINEAR);
         let sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::SAMPLED_IMAGE)
@@ -82,6 +72,8 @@ impl Textures {
         Self {
             layout,
             sampler,
+            #[cfg(feature = "text")]
+            nearest: make_sampler(c, vk::Filter::NEAREST),
             pool,
             images: Vec::new(),
             sets: Vec::new(),
@@ -124,7 +116,7 @@ impl Textures {
                 }
                 views[k] = self.images[t].as_ref().unwrap().view;
             }
-            let set = self.make_set(c, &views[..m.textures.len()]);
+            let set = self.make_set(c, &views[..m.textures.len()], self.sampler);
             if self.sets.len() <= i {
                 self.sets.resize_with(i + 1, || None);
             }
@@ -159,11 +151,21 @@ impl Textures {
                 px,
             },
         );
-        self.atlas = Some(self.make_set(c, &[img.view]));
+        let samp = if a.nearest {
+            self.nearest
+        } else {
+            self.sampler
+        };
+        self.atlas = Some(self.make_set(c, &[img.view], samp));
     }
 
     /// A set with `views` at bindings 0.. and the sampler at 4.
-    unsafe fn make_set(&self, c: &Ctx, views: &[vk::ImageView]) -> vk::DescriptorSet {
+    unsafe fn make_set(
+        &self,
+        c: &Ctx,
+        views: &[vk::ImageView],
+        sampler: vk::Sampler,
+    ) -> vk::DescriptorSet {
         let mut set = vk::DescriptorSet::default();
         ck(
             vkAllocateDescriptorSets(
@@ -183,7 +185,7 @@ impl Textures {
                     .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
             })
             .collect();
-        let samp = [vk::DescriptorImageInfo::default().sampler(self.sampler)];
+        let samp = [vk::DescriptorImageInfo::default().sampler(sampler)];
         let mut writes: Vec<_> = infos
             .iter()
             .enumerate()
@@ -251,6 +253,22 @@ impl Textures {
             ptr::null(),
         );
     }
+}
+
+unsafe fn make_sampler(c: &Ctx, filter: vk::Filter) -> vk::Sampler {
+    mk(CREATE_SAMPLER_FAILED, |p| {
+        vkCreateSampler(
+            c.device,
+            &vk::SamplerCreateInfo::default()
+                .mag_filter(filter)
+                .min_filter(filter)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+            NA,
+            p,
+        )
+    })
 }
 
 /// Makes a sampled image from `t` and records the copy into `cmd`. The staging buffer is never freed, like every

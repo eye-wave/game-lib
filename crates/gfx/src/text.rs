@@ -12,6 +12,9 @@ pub struct Atlas {
     pub w: u32,
     pub h: u32,
     pub rgb: &'static [u8],
+    /// Sample without filtering: for bitmap fonts (`font::alpha_atlas`), whose 1 px strokes and counters the linear
+    /// filter smears (and drivers round differently). Leave `false` for MSDF, which needs the interpolation.
+    pub nearest: bool,
 }
 
 impl Material {

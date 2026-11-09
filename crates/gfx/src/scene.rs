@@ -323,7 +323,7 @@ impl Scene {
         vkCmdSetViewport(cmd, 0, 1, &viewport);
         vkCmdSetScissor(cmd, 0, 1, &area);
         // opaque groups first, then the blending ones over them
-        // ponytail: blending groups draw in first-seen order, unsorted: two see-through things overlapping may
+        // blending groups draw in first-seen order, unsorted: two see-through things overlapping may
         // blend in the wrong order; sort them back to front by z if that shows
         let order = (0..2).flat_map(|pass| {
             p.groups

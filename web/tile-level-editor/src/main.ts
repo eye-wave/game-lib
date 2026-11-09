@@ -40,6 +40,9 @@ const view = { zoom: 1, x: 0, y: 0 }
 const layer = (): Layer | undefined => doc.layers[active]
 const kindOf = (l?: Layer): Kind | undefined => (l ? doc.textures[l.texture]?.kind : undefined)
 const brush = (): Brush => (brushes[layer()?.texture ?? -1] ??= { col: 0, row: 0, w: 1, h: 1, solid: false })
+const list = (what: 'event' | 'structure') => (what === 'event' ? doc.events : doc.structures)
+const selected = () => sel && list(sel.what)[sel.i]
+const gridOn = () => $<HTMLInputElement>('grid').checked
 const inMap = (x: number, y: number) => x >= 0 && y >= 0 && x < doc.w && y < doc.h
 
 // ---------------------------------------------------------------- persistence: level in localStorage, images + file handle in IndexedDB
@@ -117,7 +120,7 @@ function undo(back = true) {
   to.push(JSON.stringify(doc))
   doc = JSON.parse(s)
   active = Math.min(active, Math.max(0, doc.layers.length - 1))
-  if (sel && !(sel.what === 'event' ? doc.events : doc.structures)[sel.i]) sel = null
+  if (!selected()) sel = null
   renderAll()
 }
 
@@ -311,7 +314,7 @@ canvas.addEventListener('pointermove', e => {
   else if (drag.t === 'rect' || drag.t === 'newstruct') drag.b = [Math.max(0, Math.min(doc.w - 1, c[0])), Math.max(0, Math.min(doc.h - 1, c[1]))]
   else if (drag.t === 'move') {
     const dx = c[0] - drag.last[0], dy = c[1] - drag.last[1]
-    const o = drag.what === 'event' ? doc.events[drag.i] : doc.structures[drag.i]
+    const o = list(drag.what)[drag.i]
     const lo = drag.what === 'structure' ? (o as any).size[1] - 1 : 0, wd = drag.what === 'structure' ? (o as any).size[0] : 1
     if ((dx || dy) && o.x + dx >= 0 && o.x + dx + wd <= doc.w && o.y + dy >= lo && o.y + dy < doc.h) {
       if (!drag.moved) { commit(); drag.moved = true }
@@ -384,17 +387,16 @@ function render() {
     ctx.fillStyle = 'rgba(255,60,60,.4)'
     solidMap(doc).forEach((s, i) => s && ctx.fillRect((i % doc.w) * TILE, ((i / doc.w) | 0) * TILE, TILE, TILE))
   }
-  if ($<HTMLInputElement>('grid').checked) {
+  if (gridOn()) {
     ctx.beginPath()
     for (let x = 0; x <= doc.w; x++) { ctx.moveTo(x * TILE, 0); ctx.lineTo(x * TILE, mh) }
     for (let y = 0; y <= doc.h; y++) { ctx.moveTo(0, y * TILE); ctx.lineTo(mw, y * TILE) }
     ctx.strokeStyle = 'rgba(255,255,255,.12)'
     ctx.lineWidth = px
     ctx.stroke()
+    ctx.strokeStyle = 'rgba(255,255,255,.5)'
+    ctx.strokeRect(0, 0, mw, mh)
   }
-  ctx.strokeStyle = 'rgba(255,255,255,.5)'
-  ctx.lineWidth = px
-  ctx.strokeRect(0, 0, mw, mh)
 
   const box = (x: number, y: number, w: number, h: number, color: string, width = 2, fill?: string) => {
     if (fill) { ctx.fillStyle = fill; ctx.fillRect(x * TILE, y * TILE, w * TILE, h * TILE) }
@@ -585,9 +587,11 @@ function renderPalette() {
   pal.height = img.height
   pctx.drawImage(img, 0, 0)
   const [gw, gh] = palGrid(k)
-  pctx.fillStyle = 'rgba(255,255,255,.08)'
-  for (let x = gw; x < img.width; x += gw) pctx.fillRect(x, 0, 1, img.height)
-  for (let y = gh; y < img.height; y += gh) pctx.fillRect(0, y, img.width, 1)
+  if (gridOn()) {
+    pctx.fillStyle = 'rgba(255,255,255,.08)'
+    for (let x = gw; x < img.width; x += gw) pctx.fillRect(x, 0, 1, img.height)
+    for (let y = gh; y < img.height; y += gh) pctx.fillRect(0, y, img.width, 1)
+  }
   pctx.strokeStyle = '#ffd23f'
   pctx.lineWidth = Math.max(2, img.width / 200)
   pctx.strokeRect(b.col * gw, b.row * gh, b.w * gw, b.h * gh)
@@ -631,7 +635,7 @@ let editing = false // first change since focusing an inspector field: one undo 
 function renderInspector() {
   const box = $('inspector')
   if (box.contains(document.activeElement) && sel) return // don't rebuild what is being typed in
-  const s = sel && (sel.what === 'event' ? doc.events[sel.i] : doc.structures[sel.i])
+  const s = selected()
   if (!sel || !s) {
     box.innerHTML = `<h2>${tool[0].toUpperCase() + tool.slice(1)}</h2><p class="hint">${HELP[tool]}</p>`
     return
@@ -656,7 +660,7 @@ function renderInspector() {
 }
 $('inspector').addEventListener('focusin', () => { editing = false })
 $('inspector').addEventListener('input', e => {
-  const t = e.target as HTMLInputElement, s = sel && (sel.what === 'event' ? doc.events[sel.i] : doc.structures[sel.i])
+  const t = e.target as HTMLInputElement, s = selected()
   if (!s) return
   const num = Math.max(0, Math.floor(+t.value || 0))
   const edit = (f: () => void) => { if (!editing) { commit(); editing = true } f(); changed() }
@@ -697,7 +701,7 @@ $('inspector').addEventListener('click', e => { if ((e.target as HTMLElement).id
 function deleteSelection() {
   if (!sel) return
   commit()
-  ;(sel.what === 'event' ? doc.events : doc.structures).splice(sel.i, 1)
+  list(sel.what).splice(sel.i, 1)
   sel = null
   ;(document.activeElement as HTMLElement)?.blur()
   renderInspector()
@@ -834,7 +838,8 @@ $('saveas').onclick = () => save(true)
 $('undo').onclick = () => undo()
 $('redo').onclick = () => undo(false)
 document.querySelectorAll<HTMLButtonElement>('#tools button').forEach(b => { b.onclick = () => setTool(b.dataset.tool as Tool) })
-for (const id of ['grid', 'collision', 'overlays']) $(id).onchange = requestRender
+const redraw = () => { renderPalette(); requestRender() }
+for (const id of ['grid', 'collision', 'overlays']) $(id).onchange = redraw
 $('mw').onchange = $('mh').onchange = () => resize(+$<HTMLInputElement>('mw').value, +$<HTMLInputElement>('mh').value)
 
 addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dropping') })
@@ -848,7 +853,7 @@ addEventListener('resize', requestRender)
 
 // ---------------------------------------------------------------- keyboard
 const TOOL_KEYS: Record<string, Tool> = { b: 'brush', r: 'rect', f: 'fill', e: 'erase', i: 'pick', s: 'structure', v: 'event' }
-const toggle = (id: string) => { const c = $<HTMLInputElement>(id); c.checked = !c.checked; requestRender() }
+const toggle = (id: string) => { const c = $<HTMLInputElement>(id); c.checked = !c.checked; redraw() }
 addEventListener('keydown', e => {
   const k = e.key.toLowerCase(), ctrl = e.ctrlKey || e.metaKey
   if (ctrl && k === 's') { e.preventDefault(); return void save(e.shiftKey) }

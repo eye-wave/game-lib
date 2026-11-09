@@ -8,7 +8,7 @@
 //! Use it (the atlas goes to `gfx` as the `Atlas` resource, text meshes use `Material::msdf()`):
 //! ```ignore
 //! let font = font::include_font!("inter");
-//! w.insert_resource(gfx::Atlas { w: font.w, h: font.h, rgb: font.rgb });
+//! w.insert_resource(gfx::Atlas { w: font.w, h: font.h, rgb: font.rgb, nearest: false });
 //! let mesh = Mesh::new(&font.layout("Hello\nworld", 1.0)); // 1.0 = one em in world units
 //! ```
 //!
@@ -19,7 +19,7 @@
 //! font::build("assets/pixel.json"); // build.rs
 //! let f = font::include_font!("pixel");
 //! let img = media::load_image("pixel.png").unwrap_or_else(|e| die(e));
-//! w.insert_resource(gfx::Atlas { w: img.w, h: img.h, rgb: font::alpha_atlas(&img.rgba).leak() });
+//! w.insert_resource(gfx::Atlas { w: img.w, h: img.h, rgb: font::alpha_atlas(&img.rgba).leak(), nearest: true });
 //! ```
 #![cfg_attr(not(any(feature = "build", feature = "bitmap", test)), no_std)]
 

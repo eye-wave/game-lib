@@ -46,6 +46,7 @@ fn setup(w: &mut World, _: f32) {
         w: font.w,
         h: font.h,
         rgb: font.rgb,
+        nearest: false,
     });
     let material = w
         .resource_mut::<Assets<Material>>()

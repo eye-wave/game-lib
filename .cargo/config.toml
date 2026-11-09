@@ -15,6 +15,9 @@ rustflags = [
     "-C", "link-arg=-Wl,--gc-sections,--build-id=none,-z,norelro",
     "-C", "link-arg=-Wl,-z,nognustack",
     "-C", "link-arg=-Wl,--hash-style=gnu",
+    "-C", "link-arg=-Wl,-z,noseparate-code",
+    "-C", "link-arg=-Wl,--as-needed",
+    "-C", "link-arg=-Wl,-O1",
 ]
 
 [target.x86_64-pc-windows-msvc]

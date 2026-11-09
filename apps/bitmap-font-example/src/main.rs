@@ -39,6 +39,7 @@ fn setup(w: &mut World, _: f32) {
         w: img.w,
         h: img.h,
         rgb: font::alpha_atlas(&img.rgba).leak(),
+        nearest: true,
     });
     let material = w
         .resource_mut::<Assets<Material>>()

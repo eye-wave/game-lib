@@ -40,6 +40,7 @@ bundle app="" dir="target/bundle":
             cp "target/{{ target }}/release/$1{{ exe }}" "{{ dir }}/" \
         ' _ {}
 
+
     echo "Bundled apps:"
     find target/bundle -maxdepth 1 -type f -printf '%s %p\n' | sort -nr | awk '{printf "%.2f KiB %s\n", $1/1024, $2}'
 
