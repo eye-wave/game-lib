@@ -62,7 +62,7 @@ pub fn page() -> String {
 #[cfg(unix)]
 pub const END: &str = "p(5);</script>";
 #[cfg(windows)]
-pub const END: &str = r#"chrome.webview.addEventListener("message",e=>{e=e.data.split(":");g(+e[0],e[1],e[2],e[3])}),p(5);</script>"#;
+pub const END: &str = r#"chrome.webview.addEventListener("message",e=>{e=e.data.split(":");g(+e[0],e[1],e[2],e[3])}),p("5");</script>"#;
 
 pub enum Decoded {
     #[cfg(feature = "image")]
