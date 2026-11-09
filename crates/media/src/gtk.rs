@@ -228,14 +228,7 @@ unsafe extern "C" fn on_scheme(req: P, _data: P) {
                 let mut buf = [0u8; 1 << 16];
                 loop {
                     let mut n = 0;
-                    let ok = g_input_stream_read_all(
-                        body,
-                        buf.as_mut_ptr().cast(),
-                        buf.len(),
-                        &mut n,
-                        null_mut(),
-                        null_mut(),
-                    );
+                    let ok = g_input_stream_read_all(body, buf.as_mut_ptr().cast(), buf.len(), &mut n, null_mut(), null_mut());
                     data.extend_from_slice(&buf[..n]);
                     if ok == 0 || n < buf.len() {
                         break;
@@ -254,23 +247,12 @@ unsafe extern "C" fn on_scheme(req: P, _data: P) {
                 let copy = g_malloc(d.len().max(1)); // the stream frees it
                 core::ptr::copy_nonoverlapping(d.as_ptr(), copy.cast(), d.len());
                 let free = g_free as *const () as *const c_void;
-                (
-                    g_memory_input_stream_new_from_data(copy, d.len() as isize, free),
-                    d.len(),
-                )
+                (g_memory_input_stream_new_from_data(copy, d.len() as isize, free), d.len())
             }
             None => (g_memory_input_stream_new(), 0),
         };
         let resp = webkit_uri_scheme_response_new(stream, len as i64);
-        webkit_uri_scheme_response_set_status(
-            resp,
-            if is_asset && asset.is_none() {
-                404
-            } else {
-                200
-            },
-            null(),
-        );
+        webkit_uri_scheme_response_set_status(resp, if is_asset && asset.is_none() { 404 } else { 200 }, null());
         webkit_uri_scheme_response_set_content_type(resp, c"application/octet-stream".as_ptr());
         webkit_uri_scheme_request_finish_with_response(req, resp);
         g_object_unref(resp);

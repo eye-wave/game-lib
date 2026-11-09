@@ -17,12 +17,12 @@
 #![no_std]
 extern crate alloc;
 
-#[cfg(feature = "image")]
-mod font;
 #[cfg_attr(unix, path = "gtk.rs")]
 #[cfg_attr(windows, path = "webview2.rs")]
 mod sys;
 mod web;
+#[cfg(feature = "image")]
+mod font;
 #[cfg(feature = "image")]
 pub use font::{ASCII, COLS, Font, alpha_atlas};
 
@@ -118,7 +118,8 @@ enum Slot {
 
 struct Job {
     name: String,
-    kind: char,   // `i`mage, `a`udio or `f`ont: what the page's `go` takes
+    kind: char, // `i`mage, `a`udio or `f`ont: what the page's `go` takes
+    stage: u8, // how far the page got with it (web.rs `stages`), only for the timeout error
     head: String, // `f` only: `<px>\n<chars>\n`, sent before the file
     slot: Slot,
 }
@@ -160,6 +161,7 @@ impl Loader {
             name: name.into(),
             kind,
             head: String::new(),
+            stage: 0,
             slot: Slot::Pending,
         });
         Id(self.jobs.len() - 1)
@@ -196,12 +198,13 @@ impl Loader {
                 };
             }
         }
+        for (id, n) in core::mem::take(&mut view.inbox.stages) {
+            if let Some(job) = self.jobs.get_mut(id) {
+                job.stage = job.stage.max(n);
+            }
+        }
         for id in core::mem::take(&mut view.inbox.missing) {
-            if let Some(job) = self
-                .jobs
-                .get_mut(id)
-                .filter(|j| matches!(j.slot, Slot::Loading))
-            {
+            if let Some(job) = self.jobs.get_mut(id).filter(|j| matches!(j.slot, Slot::Loading)) {
                 job.slot = Slot::Failed(READ_FILE_FAILED);
             }
         }
@@ -303,21 +306,26 @@ impl Loader {
     }
 
     /// Blocks until everything is done. After 15 s it gives up and fails what is left: `WEBVIEW_UNAVAILABLE` if the
-    /// webview never came up, `WEBVIEW_TIMEOUT` if it did and an answer never arrived. For tools and tests; a game
+    /// webview never came up, else a `WEBVIEW_TIMEOUT_*` that says how far the page got. For tools and tests; a game
     /// polls from its frame loop instead.
     pub fn wait(&mut self) {
         let t0 = platform::now();
         while !self.done() {
             if platform::now() - t0 > 15.0 {
-                let up = self
-                    .view
-                    .as_ref()
-                    .is_some_and(|v| v.inbox.state == State::Ready);
-                return self.fail_all(if up {
-                    WEBVIEW_TIMEOUT
-                } else {
-                    WEBVIEW_UNAVAILABLE
-                });
+                let up = self.view.as_ref().is_some_and(|v| v.inbox.state == State::Ready);
+                for j in &mut self.jobs {
+                    if matches!(j.slot, Slot::Pending | Slot::Loading) {
+                        j.slot = Slot::Failed(match (up, j.stage) {
+                            (false, _) => WEBVIEW_UNAVAILABLE,
+                            (_, 0) => WEBVIEW_TIMEOUT_NO_JOB,
+                            (_, 1) => WEBVIEW_TIMEOUT_NO_FILE,
+                            (_, 2) => WEBVIEW_TIMEOUT_NO_DECODE,
+                            _ => WEBVIEW_TIMEOUT_NO_REPLY,
+                        });
+                    }
+                }
+                self.view = None;
+                return;
             }
             self.poll();
             platform::sleep_ms(1);

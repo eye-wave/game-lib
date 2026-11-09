@@ -119,7 +119,10 @@ codes! {
         IMAGE_DECODE_FAILED = 702 => "the webview could not decode the image: corrupt or truncated file, a format the system engine lacks, or larger than 4096 px",
         WEBVIEW_UNAVAILABLE = 703 => "the hidden webview that decodes media could not start: no display or GTK/WebKitGTK 4.1 missing (Linux), or no WebView2 Runtime (Windows)",
         LEVEL_MISSING_OR_CORRUPT = 705 => "a level file (baked by tilemap::build) is missing from the assets directory, truncated, or not a level",
-        WEBVIEW_TIMEOUT = 706 => "the webview did not finish a blocking load (Loader::wait / load_image) within 15 s of starting: it hung, or a reply never arrived",
+        WEBVIEW_TIMEOUT_NO_JOB = 706 => "the webview is up but the page never received the job message (host -> page message)",
+        WEBVIEW_TIMEOUT_NO_FILE = 707 => "the page got the job but never got the file: the host's answer to the page's fetch of the asset did not arrive (WebResourceRequested / custom scheme)",
+        WEBVIEW_TIMEOUT_NO_DECODE = 708 => "the page fetched the file but never finished decoding it (image load, canvas, audio or font)",
+        WEBVIEW_TIMEOUT_NO_REPLY = 709 => "the page decoded the file and posted the result, but the host never received a valid reply (POST body)",
         AUDIO_DECODE_FAILED = 704 => "the webview could not decode the sound: corrupt file, a format the system engine lacks, or empty",
     }
     unknown {

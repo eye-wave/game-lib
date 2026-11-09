@@ -30,16 +30,17 @@ pub const POST: &str = "<script>const post = m => chrome.webview.postMessage(m);
 // file `nofile`. The POST says text/plain so the browser sends it without a CORS preflight.
 const COMMON: &str = r#"
 const T = {}; // job kind -> decoder (id, name, head), filled by the parts below
-const get = async name => { const r = await fetch(B + "a/" + name); if (!r.ok) throw "nofile"; return r.blob(); };
-const reply = (id, tag, a, b, bytes) => fetch(B + "r/" + id + "/" + tag + "/" + a + "/" + b,
-  { method: "POST", body: bytes, headers: { "Content-Type": "text/plain" } }).catch(() => post(id + ":error"));
+const get = async (id, name) => { const r = await fetch(B + "a/" + name); if (!r.ok) throw "nofile"; const b = await r.blob(); post(id + ":s2"); return b; };
+const reply = (id, tag, a, b, bytes) => (post(id + ":s3"), fetch(B + "r/" + id + "/" + tag + "/" + a + "/" + b,
+  { method: "POST", body: bytes, headers: { "Content-Type": "text/plain" } }).catch(() => post(id + ":error")));
 const fail = (id, e) => post(id + (e == "nofile" ? ":nofile" : ":error"));
 "#;
 
 #[cfg(feature = "image")]
 const IMG: &str = r#"
 T.i = async (id, name) => { try {
-  const i = new Image(); i.src = URL.createObjectURL(await get(name)); await i.decode();
+  const i = new Image(), u = URL.createObjectURL(await get(id, name));
+  await new Promise((ok, no) => { i.onload = ok; i.onerror = no; i.src = u; });
   const w = i.naturalWidth, h = i.naturalHeight;
   if (w > 4096 || h > 4096) throw 0;
   const x = new OffscreenCanvas(w, h).getContext("2d");
@@ -52,7 +53,7 @@ T.i = async (id, name) => { try {
 const AUD: &str = r#"
 // Offline context: no audio device. decodeAudioData resamples to the context rate (48 kHz).
 T.a = async (id, name) => { try {
-  const a = await new OfflineAudioContext(2, 1, 48000).decodeAudioData(await (await get(name)).arrayBuffer());
+  const a = await new OfflineAudioContext(2, 1, 48000).decodeAudioData(await (await get(id, name)).arrayBuffer());
   const n = a.length, ch = a.numberOfChannels, f = new Float32Array(n * ch);
   for (let c = 0; c < ch; c++) f.set(a.getChannelData(c), c * n);
   reply(id, "audio", ch, a.sampleRate, new Uint8Array(f.buffer));
@@ -65,7 +66,7 @@ const FNT: &str = r#"
 // (font.rs `COLS`), each as wide as the widest glyph and as tall as the font's ascent + descent.
 T.f = async (id, name, head) => { try {
   const [px, chars] = decodeURIComponent(head).split("\n"), cs = [...chars];
-  const f = new FontFace("f", await (await get(name)).arrayBuffer()); await f.load(); document.fonts.add(f);
+  const f = new FontFace("f", await (await get(id, name)).arrayBuffer()); await f.load(); document.fonts.add(f);
   const c = new OffscreenCanvas(1, 1), x = c.getContext("2d", { willReadFrequently: true });
   x.font = px + "px f";
   const m = x.measureText("Mg"), a = m.fontBoundingBoxAscent;
@@ -78,8 +79,7 @@ T.f = async (id, name, head) => { try {
 } catch (e) { fail(id, e); } };
 "#;
 
-const GO: &str =
-    r#"const go = (id, k, name, head) => T[k] ? T[k](id, name, head) : post(id + ":error");"#;
+const GO: &str = r#"const go = (id, k, name, head) => (post(id + ":s1"), T[k] ? T[k](id, name, head) : post(id + ":error"));"#;
 
 /// The page script: `BASE`, the shared helpers plus the decoders of the enabled features.
 pub fn page() -> String {
@@ -129,6 +129,8 @@ pub struct Inbox {
     pub done: Vec<(usize, Option<Decoded>)>,
     /// Jobs whose file the host could not read.
     pub missing: Vec<usize>,
+    /// `(job, n)`: how far the page got (1 job received, 2 file fetched, 3 result being posted). For timeout errors.
+    pub stages: Vec<(usize, u8)>,
 }
 
 impl Inbox {
@@ -137,16 +139,19 @@ impl Inbox {
             state: State::Starting,
             done: Vec::new(),
             missing: Vec::new(),
+            stages: Vec::new(),
         }
     }
 
-    /// One plain message from the page: `ready`, `<id>:error` or `<id>:nofile`.
+    /// One plain message from the page: `ready`, `<id>:error`, `<id>:nofile` or `<id>:s<n>` (stage).
     pub fn push(&mut self, mut m: &[u8]) {
         let id = field(&mut m, b':');
         if id == b"ready" {
             self.state = State::Ready;
         } else if let Some(id) = num(id) {
-            if m == b"nofile" {
+            if let [b's', n] = m {
+                self.stages.push((id as usize, n - b'0'));
+            } else if m == b"nofile" {
                 self.missing.push(id as usize);
             } else {
                 self.done.push((id as usize, None));
@@ -183,13 +188,11 @@ fn decode(tag: &[u8], a: u32, b: u32, data: &[u8]) -> Option<Decoded> {
         b"img" => ((1..=MAX).contains(&a)
             && (1..=MAX).contains(&b)
             && data.len() == a as usize * b as usize * 4)
-            .then(|| {
-                Decoded::Image(Image {
-                    w: a,
-                    h: b,
-                    rgba: data.into(),
-                })
-            }),
+            .then(|| Decoded::Image(Image {
+                w: a,
+                h: b,
+                rgba: data.into(),
+            })),
         #[cfg(feature = "audio")]
         b"audio" => {
             let f: Vec<f32> = data
@@ -238,11 +241,7 @@ pub fn unescape(s: &[u8]) -> Vec<u8> {
     let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let (mut out, mut i) = (Vec::with_capacity(s.len()), 0);
     while i < s.len() {
-        match (
-            s[i],
-            s.get(i + 1).and_then(|&c| hex(c)),
-            s.get(i + 2).and_then(|&c| hex(c)),
-        ) {
+        match (s[i], s.get(i + 1).and_then(|&c| hex(c)), s.get(i + 2).and_then(|&c| hex(c))) {
             (b'%', Some(h), Some(l)) => {
                 out.push(h << 4 | l);
                 i += 3;
@@ -266,10 +265,7 @@ mod tests {
     fn escape_roundtrip() {
         let s = "px\nA b:ü/%é\"\\<=.png";
         let e = escape(s);
-        assert!(
-            e.bytes()
-                .all(|c| c.is_ascii_alphanumeric() || b"-._~%".contains(&c))
-        );
+        assert!(e.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._~%".contains(&c)));
         assert_eq!(unescape(e.as_bytes()), s.as_bytes());
         assert_eq!(unescape(b"100%"), b"100%"); // stray percent
     }

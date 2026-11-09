@@ -281,8 +281,7 @@ unsafe extern "system" fn invoke(this: P, a: usize, b: P) -> Hr {
                     vt::<unsafe extern "system" fn(P, *mut P) -> Hr>(req, 7)(req, &mut body);
                     let mut data = Vec::new();
                     if !body.is_null() {
-                        let read: unsafe extern "system" fn(P, *mut u8, u32, *mut u32) -> Hr =
-                            vt(body, 3);
+                        let read: unsafe extern "system" fn(P, *mut u8, u32, *mut u32) -> Hr = vt(body, 3);
                         let mut buf = [0u8; 1 << 16];
                         loop {
                             let mut n = 0;
@@ -298,21 +297,13 @@ unsafe extern "system" fn invoke(this: P, a: usize, b: P) -> Hr {
                 }
                 release(req);
                 let missing = path.starts_with(b"a/") && asset.is_none();
-                let (bytes, len) = asset
-                    .as_ref()
-                    .map_or((null(), 0), |d| (d.as_ptr(), d.len()));
+                let (bytes, len) = asset.as_ref().map_or((null(), 0), |d| (d.as_ptr(), d.len()));
                 let mem = SHCreateMemStream(bytes, len as u32);
                 // the page's origin is not ours: let it read the answer
                 let headers = wide("Access-Control-Allow-Origin: *\r\n");
-                let (code, reason) = if missing {
-                    (404, wide("Not Found"))
-                } else {
-                    (200, wide("OK"))
-                };
+                let (code, reason) = if missing { (404, wide("Not Found")) } else { (200, wide("OK")) };
                 let mut resp: P = null_mut();
-                vt::<unsafe extern "system" fn(P, P, i32, *const u16, *const u16, *mut P) -> Hr>(
-                    s.env, 4,
-                )(
+                vt::<unsafe extern "system" fn(P, P, i32, *const u16, *const u16, *mut P) -> Hr>(s.env, 4)(
                     s.env,
                     mem,
                     code,

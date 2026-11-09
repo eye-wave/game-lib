@@ -69,9 +69,7 @@ impl Font {
         size: f32,
         wrap: f32,
     ) {
-        let width = word.chars().filter(|&c| self.index(c).is_some()).count() as f32
-            * self.advance()
-            * size;
+        let width = word.chars().filter(|&c| self.index(c).is_some()).count() as f32 * self.advance() * size;
         if pen[0] > 0.0 && pen[0] + width > wrap {
             *pen = [0.0, pen[1] - self.line * size];
         }
@@ -92,12 +90,7 @@ impl Font {
     fn step(&self, out: &mut Vec<[f32; 5]>, pen: &mut [f32; 2], c: char, size: f32) {
         let Some(i) = self.index(c) else { return };
         if c != ' ' {
-            let (x0, y0, x1, y1) = (
-                pen[0],
-                pen[1],
-                pen[0] + self.advance() * size,
-                pen[1] + size,
-            );
+            let (x0, y0, x1, y1) = (pen[0], pen[1], pen[0] + self.advance() * size, pen[1] + size);
             let uv = |col: u32, px: u32, n: u32, a: u32| (col * n + px) as f32 / a as f32;
             let (cx, cy, p) = (i % COLS, i / COLS, self.inset);
             let [cw, ch] = self.cell;
@@ -127,11 +120,7 @@ mod tests {
     #[test]
     fn layout_advances_and_wraps() {
         // 160x10 grid, 10x10 cells with a 1 px padding: glyph boxes are 8x8, line 1.25 em; chars " AB"
-        let img = Image {
-            w: 160,
-            h: 10,
-            rgba: Vec::new(),
-        };
+        let img = Image { w: 160, h: 10, rgba: Vec::new() };
         let font = Font::new(&img, " AB", 1);
         assert_eq!(font.line, 1.25);
         let v = font.layout(" B\nA", 2.0);
