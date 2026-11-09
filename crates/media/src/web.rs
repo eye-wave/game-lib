@@ -188,11 +188,13 @@ fn decode(tag: &[u8], a: u32, b: u32, data: &[u8]) -> Option<Decoded> {
         b"img" => ((1..=MAX).contains(&a)
             && (1..=MAX).contains(&b)
             && data.len() == a as usize * b as usize * 4)
-            .then(|| Decoded::Image(Image {
-                w: a,
-                h: b,
-                rgba: data.into(),
-            })),
+            .then(|| {
+                Decoded::Image(Image {
+                    w: a,
+                    h: b,
+                    rgba: data.into(),
+                })
+            }),
         #[cfg(feature = "audio")]
         b"audio" => {
             let f: Vec<f32> = data
@@ -241,7 +243,11 @@ pub fn unescape(s: &[u8]) -> Vec<u8> {
     let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
     let (mut out, mut i) = (Vec::with_capacity(s.len()), 0);
     while i < s.len() {
-        match (s[i], s.get(i + 1).and_then(|&c| hex(c)), s.get(i + 2).and_then(|&c| hex(c))) {
+        match (
+            s[i],
+            s.get(i + 1).and_then(|&c| hex(c)),
+            s.get(i + 2).and_then(|&c| hex(c)),
+        ) {
             (b'%', Some(h), Some(l)) => {
                 out.push(h << 4 | l);
                 i += 3;
@@ -265,7 +271,10 @@ mod tests {
     fn escape_roundtrip() {
         let s = "px\nA b:ü/%é\"\\<=.png";
         let e = escape(s);
-        assert!(e.bytes().all(|c| c.is_ascii_alphanumeric() || b"-._~%".contains(&c)));
+        assert!(
+            e.bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"-._~%".contains(&c))
+        );
         assert_eq!(unescape(e.as_bytes()), s.as_bytes());
         assert_eq!(unescape(b"100%"), b"100%"); // stray percent
     }

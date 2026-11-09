@@ -1,6 +1,7 @@
 //! Windows backend: a hidden WebView2 (Edge) view over raw COM, no crates. Needs the WebView2 Runtime (Windows 11 has
 //! it) and `WebView2Loader.dll` next to the exe (linked with raw-dylib, so there is no import library to build
-//! with). Create and pump it on one thread that has a message loop; `platform`'s event poll is one.
+//! with). The browser profile lives in `%LOCALAPPDATA%\stupid-game\<exe name>\webview` (the default, a folder next to
+//! the exe, is the fallback). Create and pump it on one thread that has a message loop; `platform`'s event poll is one.
 //!
 //! The page is `NavigateToString`'d and talks to the made-up host `web::BASE` (https://media.localhost/): a
 //! `WebResourceRequested` filter catches those requests before they reach the network. `GET .../a/<name>` is answered
@@ -36,6 +37,16 @@ unsafe extern "system" {
     /// A new IStream over a copy of `cb` bytes (null `init`: empty).
     fn SHCreateMemStream(init: *const u8, cb: u32) -> P;
 }
+#[link(name = "kernel32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn GetModuleFileNameW(module: isize, buf: *mut u16, n: u32) -> u32;
+    fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, n: u32) -> u32;
+}
+#[link(name = "shell32", kind = "raw-dylib")]
+unsafe extern "system" {
+    /// Creates the folder and any missing parents; 0 = created.
+    fn SHCreateDirectoryExW(hwnd: isize, path: *const u16, sa: P) -> i32;
+}
 #[link(name = "user32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn DestroyWindow(h: isize) -> i32;
@@ -64,6 +75,37 @@ unsafe fn narrow(mut p: *const u16) -> Vec<u8> {
         p = unsafe { p.add(1) };
     }
     v
+}
+
+/// `%LOCALAPPDATA%\stupid-game\<exe name>\webview`, created. `None` if anything about it fails: WebView2 then
+/// falls back to its own default, a `<exe>.WebView2` folder next to the executable.
+unsafe fn data_dir() -> Option<Vec<u16>> {
+    unsafe {
+        let (mut base, mut exe) = ([0u16; 512], [0u16; 512]);
+        let n =
+            GetEnvironmentVariableW(wide("LOCALAPPDATA").as_ptr(), base.as_mut_ptr(), 512) as usize;
+        let m = GetModuleFileNameW(0, exe.as_mut_ptr(), 512) as usize;
+        if n == 0 || n >= 512 || m == 0 || m >= 512 {
+            return None; // unset, or too long for the buffer
+        }
+        let sep = |c: &u16| *c == b'\\' as u16 || *c == b'/' as u16;
+        let name = &exe[exe[..m].iter().rposition(sep).map_or(0, |i| i + 1)..m];
+        let stem = &name[..name
+            .iter()
+            .rposition(|&c| c == b'.' as u16)
+            .unwrap_or(name.len())];
+        let mut p = base[..n].to_vec();
+        p.extend("\\stupid-game\\".encode_utf16());
+        p.extend(stem);
+        p.extend("\\webview".encode_utf16());
+        p.push(0);
+        // 0 = created, 80 / 183 = already there
+        matches!(
+            SHCreateDirectoryExW(0, p.as_ptr(), null_mut()),
+            0 | 80 | 183
+        )
+        .then_some(p)
+    }
 }
 
 unsafe fn add_ref(obj: P) {
@@ -163,12 +205,17 @@ impl View {
             });
             let sp: *mut Sys = &mut *s;
             s.h.iter_mut().for_each(|h| h.sys = sp);
-            let hr = CreateCoreWebView2EnvironmentWithOptions(
+            let dir = data_dir();
+            let handler: P = (&raw mut s.h[0]).cast();
+            let mut hr = CreateCoreWebView2EnvironmentWithOptions(
                 null(),
-                null(),
+                dir.as_ref().map_or(null(), |d| d.as_ptr()),
                 null_mut(),
-                (&raw mut s.h[0]).cast(),
+                handler,
             );
+            if hr < 0 && dir.is_some() {
+                hr = CreateCoreWebView2EnvironmentWithOptions(null(), null(), null_mut(), handler);
+            }
             if hr < 0 {
                 DestroyWindow(hwnd);
                 return None;
@@ -281,7 +328,8 @@ unsafe extern "system" fn invoke(this: P, a: usize, b: P) -> Hr {
                     vt::<unsafe extern "system" fn(P, *mut P) -> Hr>(req, 7)(req, &mut body);
                     let mut data = Vec::new();
                     if !body.is_null() {
-                        let read: unsafe extern "system" fn(P, *mut u8, u32, *mut u32) -> Hr = vt(body, 3);
+                        let read: unsafe extern "system" fn(P, *mut u8, u32, *mut u32) -> Hr =
+                            vt(body, 3);
                         let mut buf = [0u8; 1 << 16];
                         loop {
                             let mut n = 0;
@@ -297,13 +345,21 @@ unsafe extern "system" fn invoke(this: P, a: usize, b: P) -> Hr {
                 }
                 release(req);
                 let missing = path.starts_with(b"a/") && asset.is_none();
-                let (bytes, len) = asset.as_ref().map_or((null(), 0), |d| (d.as_ptr(), d.len()));
+                let (bytes, len) = asset
+                    .as_ref()
+                    .map_or((null(), 0), |d| (d.as_ptr(), d.len()));
                 let mem = SHCreateMemStream(bytes, len as u32);
                 // the page's origin is not ours: let it read the answer
                 let headers = wide("Access-Control-Allow-Origin: *\r\n");
-                let (code, reason) = if missing { (404, wide("Not Found")) } else { (200, wide("OK")) };
+                let (code, reason) = if missing {
+                    (404, wide("Not Found"))
+                } else {
+                    (200, wide("OK"))
+                };
                 let mut resp: P = null_mut();
-                vt::<unsafe extern "system" fn(P, P, i32, *const u16, *const u16, *mut P) -> Hr>(s.env, 4)(
+                vt::<unsafe extern "system" fn(P, P, i32, *const u16, *const u16, *mut P) -> Hr>(
+                    s.env, 4,
+                )(
                     s.env,
                     mem,
                     code,
