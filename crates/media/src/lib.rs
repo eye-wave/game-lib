@@ -17,13 +17,13 @@
 #![no_std]
 extern crate alloc;
 
-#[cfg(feature = "font")]
+#[cfg(feature = "image")]
 mod font;
 #[cfg_attr(unix, path = "gtk.rs")]
 #[cfg_attr(windows, path = "webview2.rs")]
 mod sys;
 mod web;
-#[cfg(feature = "font")]
+#[cfg(feature = "image")]
 pub use font::{ASCII, COLS, Font, alpha_atlas};
 
 use alloc::{string::String, vec::Vec};
@@ -302,13 +302,17 @@ impl Loader {
         }
     }
 
-    /// Blocks until everything is done. For tools and tests; a game polls from its frame loop instead.
-    // no timeout, a page that never answers hangs this. Count polls here if one ever does.
+    /// Blocks until everything is done, or fails what is left with `WEBVIEW_TIMEOUT` after 30 s. For tools and
+    /// tests; a game polls from its frame loop instead.
     pub fn wait(&mut self) {
-        while !self.done() {
+        for _ in 0..30_000 {
+            if self.done() {
+                return;
+            }
             self.poll();
             platform::sleep_ms(1);
         }
+        self.fail_all(WEBVIEW_TIMEOUT);
     }
 }
 

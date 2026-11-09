@@ -6,8 +6,8 @@
 //! - Page -> host: it `POST`s the raw result bytes to `BASE + "r/<id>/<tag>/<a>/<b>"` (`img`: w h, rgba;
 //!   `audio`: channels rate, planar f32 LE), which the backend hands to `Inbox::push_reply`.
 //! - Only `ready`, `<id>:error` and `<id>:nofile` are plain messages (`post`).
-//!   `BASE` is a custom scheme on GTK and a made-up https host on WebView2 (the backend intercepts the requests,
-//!   nothing goes to the network). Everything the page sends is re-checked here.
+//! `BASE` is a custom scheme on GTK and a made-up https host on WebView2 (the backend intercepts the requests,
+//! nothing goes to the network). Everything the page sends is re-checked here.
 #[cfg(feature = "audio")]
 use crate::{Clip, MAX_SAMPLES};
 #[cfg(feature = "image")]

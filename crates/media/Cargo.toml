@@ -5,11 +5,12 @@ edition = "2024"
 
 [features]
 default = ["image", "audio", "font"]
-# what the hidden page can decode (each adds its script part; off = no `Loader::image` / `sound` / `font`).
-# `font` draws a TTF/OTF/WOFF into a glyph grid and brings `Font` (layout from any grid image, e.g. a pixel font's PNG).
+# `image`: image decoding, and `Font` (text layout from any grid image, e.g. a pixel font's PNG: plain Rust, no webview).
+# `audio`: sound decoding. `font`: `Loader::font`, the page draws a TTF/OTF/WOFF into such a grid.
+# Each adds its part of the page script; off = no `Loader::image` / `sound` / `font`.
 image = []
 audio = []
-font = ["image"] # the grid comes back as an `Image`
+font = ["image"]
 
 [dependencies]
 errors = { path = "../errors" }
