@@ -3,11 +3,16 @@
 //! libwebkit2gtk-4.1; Windows needs the WebView2 Runtime and `WebView2Loader.dll` next to the exe (`WEBVIEW_UNAVAILABLE`
 //! otherwise). Errors are `die`-ready codes.
 //!
-//! `Loader` is the asset system: queue files, call `poll` once per frame, read `progress`/`status`, `take` what is
-//! ready. An asset is `Pending` (queued, waiting for the webview to start or for a free slot: at most `MAX_RUNNING`
+//! The asset system is one global `Loader`, used through the free functions: `image`/`sound`/`font` queue a file,
+//! `poll` once per frame, read `progress`/`status`, `take_image`/`take_clip` what is ready. An asset is `Pending` (queued, waiting for the webview to start or for a free slot: at most `MAX_RUNNING`
 //! decodes at a time), `Loading` (the webview is decoding it), then `Ready` or `Failed(code)`. Nothing blocks except
-//! `Loader::wait` and `load_image`, which are for tools and tests. Call everything from one thread that owns the
-//! GTK main context / has a message loop (your main thread). The webview lives only while something is queued.
+//! `wait` and `load_image`, which are for tools and tests. Call everything from one thread that owns the GTK main
+//! context / has a message loop (your main thread).
+//!
+//! The webview lives only while something is queued, and every start costs time. To load in several rounds,
+//! `spawn()` the loader first: its webview then starts at once and stays up until `despawn()` (which also forgets
+//! all assets and their `Id`s: take what you need first). Without `spawn` it comes and goes by itself. A `Loader`
+//! of your own (`Loader::new`) works the same way but has a webview of its own.
 //!
 //! Text: `Loader::font` has the webview draw a TTF/OTF/WOFF into a glyph grid image; a pixel font is just such an image
 //! already. `Font` (see `font.rs`) lays text out from the grid in plain Rust.
@@ -128,6 +133,8 @@ struct Job {
 pub struct Loader {
     jobs: Vec<Job>,
     view: Option<View>,
+    /// Keep the webview up when the queue is empty (`spawn`).
+    persistent: bool,
 }
 
 impl Loader {
@@ -170,8 +177,8 @@ impl Loader {
     /// Call once per frame: runs the webview's pending events, files away what it finished, and starts pending
     /// assets while there is room. Nothing blocks: the page fetches the files from the host as it goes.
     pub fn poll(&mut self) {
-        if self.done() {
-            return;
+        if self.done() && self.view.is_none() {
+            return; // nothing queued, nothing running
         }
         if self.view.is_none() {
             self.view = View::new();
@@ -233,7 +240,7 @@ impl Loader {
             running += 1;
             job.slot = Slot::Loading;
         }
-        if self.done() {
+        if self.done() && !self.persistent {
             self.view = None; // frees the browser process; the next queued asset starts a new one
         }
     }
@@ -340,14 +347,79 @@ impl Loader {
     }
 }
 
+// The global loader. One thread only (see the module docs), and none of the functions below calls another one
+// from inside `with`, so the `&mut` is never aliased.
+// its job list only grows (an `Id` is an index); `despawn()` resets it.
+struct Global(core::cell::UnsafeCell<Option<Loader>>);
+unsafe impl Sync for Global {}
+static GLOBAL: Global = Global(core::cell::UnsafeCell::new(None));
+
+fn with<R>(f: impl FnOnce(&mut Loader) -> R) -> R {
+    f(unsafe { &mut *GLOBAL.0.get() }.get_or_insert_with(Loader::new))
+}
+
+/// Start the global loader's webview now and keep it up until `despawn`, however often the queue runs empty.
+pub fn spawn() {
+    with(|l| {
+        l.persistent = true;
+        if l.view.is_none() {
+            l.view = View::new(); // `None` (no display): the first asset fails with `WEBVIEW_UNAVAILABLE`
+        }
+    })
+}
+
+/// Shut the webview down and forget every asset, finished or not. `spawn` again to start over.
+pub fn despawn() {
+    unsafe { *GLOBAL.0.get() = None }
+}
+
 #[cfg(feature = "image")]
-/// Blocking one-off: queue, wait, take. For programs with nothing to show while they load.
+pub fn image(name: &str) -> Id {
+    with(|l| l.image(name))
+}
+#[cfg(feature = "audio")]
+pub fn sound(name: &str) -> Id {
+    with(|l| l.sound(name))
+}
+#[cfg(feature = "font")]
+pub fn font(name: &str, chars: &str, px: u32) -> Id {
+    with(|l| l.font(name, chars, px))
+}
+#[cfg(feature = "image")]
+pub fn take_image(id: Id) -> Option<Image> {
+    with(|l| l.take_image(id))
+}
+#[cfg(feature = "audio")]
+pub fn take_clip(id: Id) -> Option<Clip> {
+    with(|l| l.take_clip(id))
+}
+pub fn poll() {
+    with(|l| l.poll())
+}
+pub fn status(id: Id) -> Status {
+    with(|l| l.status(id))
+}
+pub fn done() -> bool {
+    with(|l| l.done())
+}
+pub fn failed() -> Option<&'static CStr> {
+    with(|l| l.failed())
+}
+pub fn progress() -> f32 {
+    with(|l| l.progress())
+}
+/// Blocks until everything is done (see `Loader::wait`).
+pub fn wait() {
+    with(|l| l.wait())
+}
+
+/// Blocking one-off: queue, wait, take. For programs with nothing to show while they load. A `spawn`ed webview is
+/// reused, so a few of these in a row cost one start.
+#[cfg(feature = "image")]
 pub fn load_image(name: &str) -> Result<Image, &'static CStr> {
-    let mut l = Loader::new();
-    let id = l.image(name);
-    l.wait();
-    l.take_image(id)
-        .ok_or(l.failed().unwrap_or(IMAGE_DECODE_FAILED))
+    let id = image(name);
+    wait();
+    take_image(id).ok_or(failed().unwrap_or(IMAGE_DECODE_FAILED))
 }
 
 #[cfg(all(test, feature = "image", feature = "audio", feature = "font"))]

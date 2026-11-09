@@ -1,7 +1,7 @@
 //! Windows backend: a hidden WebView2 (Edge) view over raw COM, no crates. Needs the WebView2 Runtime (Windows 11 has
 //! it) and `WebView2Loader.dll` next to the exe (linked with raw-dylib, so there is no import library to build
-//! with). The browser profile lives in `%LOCALAPPDATA%\stupid-game\<exe name>\webview` (the default, a folder next to
-//! the exe, is the fallback). Create and pump it on one thread that has a message loop; `platform`'s event poll is one.
+//! with). The browser profile is one folder shared by all apps, `%LOCALAPPDATA%\stupid-game\webview` (the default, a
+//! folder next to the exe, is the fallback). Create and pump it on one thread that has a message loop; `platform`'s event poll is one.
 //!
 //! The page is `NavigateToString`'d and talks to the made-up host `web::BASE` (https://media.localhost/): a
 //! `WebResourceRequested` filter catches those requests before they reach the network. `GET .../a/<name>` is answered
@@ -39,7 +39,6 @@ unsafe extern "system" {
 }
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
-    fn GetModuleFileNameW(module: isize, buf: *mut u16, n: u32) -> u32;
     fn GetEnvironmentVariableW(name: *const u16, buf: *mut u16, n: u32) -> u32;
 }
 #[link(name = "shell32", kind = "raw-dylib")]
@@ -77,27 +76,20 @@ unsafe fn narrow(mut p: *const u16) -> Vec<u8> {
     v
 }
 
-/// `%LOCALAPPDATA%\stupid-game\<exe name>\webview`, created. `None` if anything about it fails: WebView2 then
-/// falls back to its own default, a `<exe>.WebView2` folder next to the executable.
+/// `%LOCALAPPDATA%\stupid-game\webview`, created: one browser profile for every app made with this engine (WebView2
+/// lets several processes share a folder as long as they ask for the same environment, which is the default
+/// one). `None` if anything about it fails: WebView2 then falls back to its own default, a `<exe>.WebView2` folder next
+/// to the executable.
 unsafe fn data_dir() -> Option<Vec<u16>> {
     unsafe {
-        let (mut base, mut exe) = ([0u16; 512], [0u16; 512]);
+        let mut base = [0u16; 512];
         let n =
             GetEnvironmentVariableW(wide("LOCALAPPDATA").as_ptr(), base.as_mut_ptr(), 512) as usize;
-        let m = GetModuleFileNameW(0, exe.as_mut_ptr(), 512) as usize;
-        if n == 0 || n >= 512 || m == 0 || m >= 512 {
+        if n == 0 || n >= 512 {
             return None; // unset, or too long for the buffer
         }
-        let sep = |c: &u16| *c == b'\\' as u16 || *c == b'/' as u16;
-        let name = &exe[exe[..m].iter().rposition(sep).map_or(0, |i| i + 1)..m];
-        let stem = &name[..name
-            .iter()
-            .rposition(|&c| c == b'.' as u16)
-            .unwrap_or(name.len())];
         let mut p = base[..n].to_vec();
-        p.extend("\\stupid-game\\".encode_utf16());
-        p.extend(stem);
-        p.extend("\\webview".encode_utf16());
+        p.extend("\\stupid-game\\webview".encode_utf16());
         p.push(0);
         // 0 = created, 80 / 183 = already there
         matches!(

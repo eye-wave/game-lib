@@ -1,7 +1,7 @@
 //! Three buttons, each drawn from an image in a different format (PNG, JPEG, WebP). Pressing one plays a sound
 //! decoded from a different format (WAV, MP3, Ogg Vorbis). Each button dims while it is held.
 //! Like sprite-example, every image pixel is a 1x1 quad: no textures in gfx yet.
-//! Startup queues all six files in a `media::Loader` (a hidden webview decodes them in the background) and shows a black
+//! Startup queues all six files in a global `media` loader (a hidden webview decodes them in the background) and shows a black
 //! screen with a loading bar drawn by `loading.wgsl`; the buttons appear once everything is `Ready`.
 //! A file that fails ends the program with its error code (703: webview unavailable, 701: file missing, 702/704: bad image/sound).
 #![no_std]
@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use audio::{Audio, Sample};
 use ecs::{App, Entity, Schedule::*, World};
 use gfx::{Assets, Camera2d, Color, Input, Material, Mesh, PostProcess, RunExt, Transform};
-use media::{Clip, Id, Image, Loader};
+use media::{Clip, Id, Image};
 use platform::die;
 use shader::{Align4, include_shader};
 
@@ -36,7 +36,6 @@ struct Buttons(Vec<Button>);
 
 /// The files being loaded: (image, sound) per button, left to right. `shown` is the bar's eased progress.
 struct Loading {
-    loader: Loader,
     files: [(Id, Id); 3],
     shown: f32,
 }
@@ -72,18 +71,13 @@ fn sample(c: Clip) -> Sample {
 
 /// Queue everything and show the loading screen. Nothing else is on screen until `load` is done.
 fn setup(w: &mut World, _: f32) {
-    let mut loader = Loader::new();
     // image format -> sound format, left to right
     let files = [
-        (loader.image("red.png"), loader.sound("c5.wav")),
-        (loader.image("green.jpg"), loader.sound("e5.mp3")),
-        (loader.image("blue.webp"), loader.sound("g5.ogg")),
+        (media::image("red.png"), media::sound("c5.wav")),
+        (media::image("green.jpg"), media::sound("e5.mp3")),
+        (media::image("blue.webp"), media::sound("g5.ogg")),
     ];
-    w.insert_resource(Loading {
-        loader,
-        files,
-        shown: 0.0,
-    });
+    w.insert_resource(Loading { files, shown: 0.0 });
     *w.resource_mut::<PostProcess>().unwrap() = PostProcess(Some(LOADING), 0.0);
 }
 
@@ -93,12 +87,12 @@ fn load(w: &mut World, dt: f32) {
         return; // already built
     }
     let l = w.resource_mut::<Loading>().unwrap();
-    l.loader.poll();
-    if let Some(e) = l.loader.failed() {
+    media::poll();
+    if let Some(e) = media::failed() {
         die(e);
     }
-    l.shown += (l.loader.progress() - l.shown) * (dt * 10.0).min(1.0);
-    let (shown, done) = (l.shown, l.loader.done());
+    l.shown += (media::progress() - l.shown) * (dt * 10.0).min(1.0);
+    let (shown, done) = (l.shown, media::done());
     w.resource_mut::<PostProcess>().unwrap().1 = shown;
     if done && shown > 0.99 {
         // everything is Ready (a failure died above), so the takes cannot miss
@@ -106,12 +100,7 @@ fn load(w: &mut World, dt: f32) {
         let loaded: Vec<(Image, Clip)> = l
             .files
             .iter()
-            .map(|&(i, s)| {
-                (
-                    l.loader.take_image(i).unwrap(),
-                    l.loader.take_clip(s).unwrap(),
-                )
-            })
+            .map(|&(i, s)| (media::take_image(i).unwrap(), media::take_clip(s).unwrap()))
             .collect();
         build(w, loaded);
         *w.resource_mut::<PostProcess>().unwrap() = PostProcess(None, 0.0);

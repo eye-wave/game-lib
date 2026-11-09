@@ -2,14 +2,14 @@
 //! libwebkit2gtk-4.1 (2.40 or newer: it reads POST bodies of custom schemes) at build and run time. Create and
 //! pump it on the thread that owns GTK (the main thread).
 //!
-//! The page lives at `app://m/` (a custom scheme, registered once, as CORS-enabled and secure so its `fetch`es are
-//! allowed): `GET app://m/a/<name>` is answered from the assets directory, `POST app://m/r/...` hands the raw
+//! The page lives at `app://m/` (a custom scheme, registered on the view's own context, as CORS-enabled and secure
+//! so its `fetch`es are allowed; that context is ephemeral, so nothing is written to disk): `GET app://m/a/<name>` is answered from the assets directory, `POST app://m/r/...` hands the raw
 //! result bytes to the `Inbox`. See web.rs.
 use crate::web::{self, Inbox};
 use alloc::{boxed::Box, vec::Vec};
 use core::ffi::{CStr, c_char, c_int, c_uint, c_ulong, c_void};
 use core::ptr::{null, null_mut};
-use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering::Relaxed};
+use core::sync::atomic::{AtomicPtr, Ordering::Relaxed};
 
 type P = *mut c_void;
 
@@ -55,12 +55,12 @@ unsafe extern "C" {
 }
 #[link(name = "webkit2gtk-4.1")]
 unsafe extern "C" {
-    fn webkit_user_content_manager_new() -> P;
     fn webkit_user_content_manager_register_script_message_handler(
         m: P,
         name: *const c_char,
     ) -> c_int;
-    fn webkit_web_view_new_with_user_content_manager(m: P) -> P;
+    fn webkit_web_view_new_with_context(ctx: P) -> P;
+    fn webkit_web_view_get_user_content_manager(v: P) -> P; // not owned
     fn webkit_web_view_load_html(v: P, html: *const c_char, base: *const c_char);
     fn webkit_web_view_evaluate_javascript(
         v: P,
@@ -73,7 +73,8 @@ unsafe extern "C" {
         data: P,
     );
     fn webkit_javascript_result_get_js_value(r: P) -> P;
-    fn webkit_web_context_get_default() -> P;
+    /// A context that writes nothing to disk: no profile folder, per app or shared.
+    fn webkit_web_context_new_ephemeral() -> P;
     fn webkit_web_context_register_uri_scheme(
         ctx: P,
         scheme: *const c_char,
@@ -99,10 +100,9 @@ unsafe extern "C" {
     fn setenv(k: *const c_char, v: *const c_char, overwrite: c_int) -> c_int;
 }
 
-/// Where `on_scheme` files the page's replies: the live view's inbox (the scheme can only be registered once, so
-/// the handler cannot carry a pointer of its own). Null while no view exists.
+/// Where `on_scheme` files the page's replies: the live view's inbox. Null while no view exists, so a request that
+/// is still in flight when the view goes away cannot reach a freed inbox.
 static INBOX: AtomicPtr<Inbox> = AtomicPtr::new(null_mut());
-static REGISTERED: AtomicBool = AtomicBool::new(false);
 
 pub struct View {
     pub inbox: Box<Inbox>, // boxed: the signal handler keeps a pointer to it
@@ -126,20 +126,20 @@ impl View {
             }
             let mut inbox = Box::new(Inbox::new());
             INBOX.store(&mut *inbox, Relaxed);
-            let ctx = webkit_web_context_get_default();
-            if !REGISTERED.swap(true, Relaxed) {
-                webkit_web_context_register_uri_scheme(
-                    ctx,
-                    c"app".as_ptr(),
-                    on_scheme as *const () as *const c_void,
-                    null_mut(),
-                    null(),
-                );
-                let sm = webkit_web_context_get_security_manager(ctx);
-                webkit_security_manager_register_uri_scheme_as_cors_enabled(sm, c"app".as_ptr());
-                webkit_security_manager_register_uri_scheme_as_secure(sm, c"app".as_ptr());
-            }
-            let ucm = webkit_user_content_manager_new();
+            let ctx = webkit_web_context_new_ephemeral();
+            webkit_web_context_register_uri_scheme(
+                ctx,
+                c"app".as_ptr(),
+                on_scheme as *const () as *const c_void,
+                null_mut(),
+                null(),
+            );
+            let sm = webkit_web_context_get_security_manager(ctx);
+            webkit_security_manager_register_uri_scheme_as_cors_enabled(sm, c"app".as_ptr());
+            webkit_security_manager_register_uri_scheme_as_secure(sm, c"app".as_ptr());
+            let view = webkit_web_view_new_with_context(ctx);
+            g_object_unref(ctx); // the view keeps it alive
+            let ucm = webkit_web_view_get_user_content_manager(view);
             webkit_user_content_manager_register_script_message_handler(ucm, c"ipc".as_ptr());
             g_signal_connect_data(
                 ucm,
@@ -149,8 +149,6 @@ impl View {
                 null(),
                 0,
             );
-            let view = webkit_web_view_new_with_user_content_manager(ucm);
-            g_object_unref(ucm);
             let win = gtk_offscreen_window_new();
             gtk_container_add(win, view);
             gtk_widget_show_all(win);
@@ -159,6 +157,7 @@ impl View {
                 html.extend_from_slice(s.as_bytes());
             }
             html.push(0);
+
             // base URI = the page's origin, so its fetches to `app://m/` are same-origin
             webkit_web_view_load_html(view, html.as_ptr().cast(), c"app://m/".as_ptr());
             Some(Self { inbox, win, view })
@@ -177,7 +176,7 @@ impl View {
     /// Start decoding asset `name` (`kind` as in `lib.rs`; `name` and `head` already `web::escape`d, so plain ASCII
     /// that is safe in a JS string); the page fetches the file and the answer comes back through `inbox`.
     pub fn run(&mut self, id: usize, kind: char, name: &str, head: &str) {
-        let js = alloc::format!("go({id},\"{kind}\",\"{name}\",\"{head}\")");
+        let js = alloc::format!("g({id},\"{kind}\",\"{name}\",\"{head}\")");
         unsafe {
             webkit_web_view_evaluate_javascript(
                 self.view,

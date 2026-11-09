@@ -222,6 +222,7 @@ fn person(w: &mut World, ui: Ui, at: Vec2, body: [f32; 3], hair: [f32; 3]) {
 }
 
 fn setup(w: &mut World, _: f32) {
+    media::spawn(); // the startup loads (the font, then the level's images) share one webview
     w.insert_resource(Sheets::new(load_sheet));
     let img = media::load_image("pixel.png").unwrap_or_else(|e| die(e));
     w.insert_resource(Maps {
@@ -261,6 +262,7 @@ fn setup(w: &mut World, _: f32) {
     *w.resource_mut::<PostProcess>().unwrap() = PostProcess(Some(FADE), 0.0);
 
     let first = add_map(w, "town.level");
+    media::despawn(); // later maps load on demand, each with a webview that comes and goes
     let (drawn, h) = {
         let m = &w.resource::<Maps>().unwrap().list[first];
         (m.drawn.clone(), m.level.h)

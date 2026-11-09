@@ -6,8 +6,8 @@
 //! - Page -> host: it `POST`s the raw result bytes to `BASE + "r/<id>/<tag>/<a>/<b>"` (`img`: w h, rgba;
 //!   `audio`: channels rate, planar f32 LE), which the backend hands to `Inbox::push_reply`.
 //! - Only `ready`, `<id>:error` and `<id>:nofile` are plain messages (`post`).
-//! `BASE` is a custom scheme on GTK and a made-up https host on WebView2 (the backend intercepts the requests,
-//! nothing goes to the network). Everything the page sends is re-checked here.
+//!   `BASE` is a custom scheme on GTK and a made-up https host on WebView2 (the backend intercepts the requests,
+//!   nothing goes to the network). Everything the page sends is re-checked here.
 #[cfg(feature = "audio")]
 use crate::{Clip, MAX_SAMPLES};
 #[cfg(feature = "image")]
@@ -22,64 +22,25 @@ pub const BASE: &str = "https://media.localhost/";
 
 /// Backend-specific: how the page sends a string to the host.
 #[cfg(unix)]
-pub const POST: &str = "<script>const post = m => webkit.messageHandlers.ipc.postMessage(m);";
+pub const POST: &str = "<script>var p=m=>webkit.messageHandlers.ipc.postMessage(m),";
 #[cfg(windows)]
-pub const POST: &str = "<script>const post = m => chrome.webview.postMessage(m);";
+pub const POST: &str = "<script>var p=m=>chrome.webview.postMessage(m),";
 
 // 4096 below is `MAX`: an oversize image is refused before its pixels are shipped. Failures post `error`, a missing
 // file `nofile`. The POST says text/plain so the browser sends it without a CORS preflight.
-const COMMON: &str = r#"
-const T = {}; // job kind -> decoder (id, name, head), filled by the parts below
-const get = async (id, name) => { const r = await fetch(B + "a/" + name); if (!r.ok) throw "nofile"; const b = await r.blob(); post(id + ":s2"); return b; };
-const reply = (id, tag, a, b, bytes) => (post(id + ":s3"), fetch(B + "r/" + id + "/" + tag + "/" + a + "/" + b,
-  { method: "POST", body: bytes, headers: { "Content-Type": "text/plain" } }).catch(() => post(id + ":error")));
-const fail = (id, e) => post(id + (e == "nofile" ? ":nofile" : ":error"));
-"#;
+const COMMON: &str = r#"T={},n="N",x=":E",G=async(t,e)=>{if(!(e=await fetch(B+"a/"+e)).ok)throw n;return p(t+":s2"),e.blob()},reply=(t,e,o,r,a)=>(p(t+":s3"),fetch(B+"r/"+t+"/"+e+"/"+o+"/"+r,{method:"POST",body:a,headers:{"content-type":"text/plain"}}).catch(()=>p(t+x))),fail=(t,e)=>p(t+(n==e?":"+n:x)),g=(o,s,r,t)=>(p(o+":s1"),T[s]?T[s](o,r,t):p(o+":E")),"#;
 
 #[cfg(feature = "image")]
-const IMG: &str = r#"
-T.i = async (id, name) => { try {
-  const i = new Image(), u = URL.createObjectURL(await get(id, name));
-  await new Promise((ok, no) => { i.onload = ok; i.onerror = no; i.src = u; });
-  const w = i.naturalWidth, h = i.naturalHeight;
-  if (w > 4096 || h > 4096) throw 0;
-  const x = new OffscreenCanvas(w, h).getContext("2d");
-  x.drawImage(i, 0, 0);
-  reply(id, "img", w, h, x.getImageData(0, 0, w, h).data);
-} catch (e) { fail(id, e); } };
-"#;
+const IMG: &str = r#"S=4096;T.i=async(e,a)=>{try{var i=new Image,c=URL.createObjectURL(await G(e,a));await new Promise((a,e)=>{i.onload=a,i.onerror=e,i.src=c});var t=i.naturalWidth,r=i.naturalHeight;if(S<t||S<r)throw 0;var n=new OffscreenCanvas(t,r).getContext("2d");n.drawImage(i,0,0),reply(e,"img",t,r,n.getImageData(0,0,t,r).data)}catch(a){fail(e,a)}};"#;
 
 #[cfg(feature = "audio")]
-const AUD: &str = r#"
 // Offline context: no audio device. decodeAudioData resamples to the context rate (48 kHz).
-T.a = async (id, name) => { try {
-  const a = await new OfflineAudioContext(2, 1, 48000).decodeAudioData(await (await get(id, name)).arrayBuffer());
-  const n = a.length, ch = a.numberOfChannels, f = new Float32Array(n * ch);
-  for (let c = 0; c < ch; c++) f.set(a.getChannelData(c), c * n);
-  reply(id, "audio", ch, a.sampleRate, new Uint8Array(f.buffer));
-} catch (e) { fail(id, e); } };
-"#;
+const AUD: &str = r#"T.a=async(e,a)=>{try{var t=await new OfflineAudioContext(2,1,48e3).decodeAudioData(await(await G(e,a)).arrayBuffer()),n=t.length,r=t.numberOfChannels,f=new Float32Array(n*r);for(a=0;a<r;a++)f.set(t.getChannelData(a),a*n);reply(e,"audio",r,t.sampleRate,new Uint8Array(f.buffer))}catch(a){fail(e,a)}};"#;
 
 #[cfg(feature = "font")]
-const FNT: &str = r#"
 // Font file -> glyph grid image (reply `img`). `head` is `<px>\n<chars>\n`; the grid has 16 cells per row
 // (font.rs `COLS`), each as wide as the widest glyph and as tall as the font's ascent + descent.
-T.f = async (id, name, head) => { try {
-  const [px, chars] = decodeURIComponent(head).split("\n"), cs = [...chars];
-  const f = new FontFace("f", await (await get(id, name)).arrayBuffer()); await f.load(); document.fonts.add(f);
-  const c = new OffscreenCanvas(1, 1), x = c.getContext("2d", { willReadFrequently: true });
-  x.font = px + "px f";
-  const m = x.measureText("Mg"), a = m.fontBoundingBoxAscent;
-  const cw = Math.ceil(Math.max(...cs.map(g => x.measureText(g).width))), ch = Math.ceil(a + m.fontBoundingBoxDescent);
-  const w = cw * 16, h = ch * Math.ceil(cs.length / 16);
-  if (w > 4096 || h > 4096) throw 0;
-  c.width = w; c.height = h; x.font = px + "px f"; x.fillStyle = "white";
-  cs.forEach((g, k) => x.fillText(g, k % 16 * cw, Math.floor(k / 16) * ch + a));
-  reply(id, "img", w, h, x.getImageData(0, 0, w, h).data);
-} catch (e) { fail(id, e); } };
-"#;
-
-const GO: &str = r#"const go = (id, k, name, head) => (post(id + ":s1"), T[k] ? T[k](id, name, head) : post(id + ":error"));"#;
+const FNT: &str = r#"T.f=async(e,t,a)=>{try{var[n,o]=decodeURIComponent(a).split("\n"),f=[...o],i=new FontFace("f",await(await G(e,t)).arrayBuffer());await i.load(),document.fonts.add(i);const h=new OffscreenCanvas(1,1),r=h.getContext("2d",{willReadFrequently:!0}),d=(r.font=n+"px f",r.measureText("Mg")),g=d.fontBoundingBoxAscent,s=Math.ceil(Math.max(...f.map(t=>r.measureText(t).width))),w=Math.ceil(g+d.fontBoundingBoxDescent);var l=16*s,c=w*((f.length+15)/16|0);if(S<l||S<c)throw 0;h.width=l,h.height=c,r.font=n+"px f",r.fillStyle="\#fff",f.forEach((t,e)=>r.fillText(t,e%16*s,Math.floor(e/16)*w+g)),reply(e,"img",l,c,r.getImageData(0,0,l,c).data)}catch(t){fail(e,t)}};"#;
 
 /// The page script: `BASE`, the shared helpers plus the decoders of the enabled features.
 pub fn page() -> String {
@@ -91,21 +52,17 @@ pub fn page() -> String {
         AUD,
         #[cfg(feature = "font")]
         FNT,
-        GO,
     ];
-    let mut s = alloc::format!("const B = \"{BASE}\";");
+    let mut s = alloc::format!("B=\"{BASE}\",");
     s.extend(parts);
     s
 }
 
 /// Closes the page's script and, on WebView2 (where the host sends jobs as messages), listens for them.
 #[cfg(unix)]
-pub const END: &str = "post(\"ready\");</script>";
+pub const END: &str = "p(5);</script>";
 #[cfg(windows)]
-pub const END: &str = r#"chrome.webview.addEventListener("message", e => {
-  const m = e.data.split(":"); go(+m[0], m[1], m[2], m[3]);
-});
-post("ready");</script>"#;
+pub const END: &str = r#"chrome.webview.addEventListener("message",e=>{e=e.data.split(":");g(+e[0],e[1],e[2],e[3])}),p(5);</script>"#;
 
 pub enum Decoded {
     #[cfg(feature = "image")]
@@ -143,15 +100,15 @@ impl Inbox {
         }
     }
 
-    /// One plain message from the page: `ready`, `<id>:error`, `<id>:nofile` or `<id>:s<n>` (stage).
+    /// One plain message from the page: `5` (ready), `<id>:E (error)`, `<id>:N (nofile)` or `<id>:s<n>` (stage).
     pub fn push(&mut self, mut m: &[u8]) {
         let id = field(&mut m, b':');
-        if id == b"ready" {
+        if id == b"5" {
             self.state = State::Ready;
         } else if let Some(id) = num(id) {
             if let [b's', n] = m {
                 self.stages.push((id as usize, n - b'0'));
-            } else if m == b"nofile" {
+            } else if m == b"N" {
                 self.missing.push(id as usize);
             } else {
                 self.done.push((id as usize, None));
@@ -282,15 +239,15 @@ mod tests {
     #[test]
     fn replies() {
         let mut ib = Inbox::new();
-        ib.push(b"ready");
+        ib.push(b"5");
         assert!(ib.state == State::Ready && ib.done.is_empty());
 
         ib.push_reply(b"r/3/img/2/1", &[1, 2, 3, 4, 5, 6, 7, 8]);
         ib.push_reply(b"r/4/img/2/1", &[1, 2, 3]); // short pixels
         ib.push_reply(b"r/5/img/5000/1", &[]); // over MAX
-        ib.push(b"6:error");
+        ib.push(b"6:E");
         ib.push(b"junk"); // no id: ignored
-        ib.push(b"10:nofile");
+        ib.push(b"10:N");
         ib.push_reply(b"r/11/img/2", &[]); // path too short: dropped
         ib.push_reply(b"x/12/img/2/1", &[0; 8]); // not a reply path: dropped
         let mut f = vec![];
