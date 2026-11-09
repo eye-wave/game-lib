@@ -302,17 +302,26 @@ impl Loader {
         }
     }
 
-    /// Blocks until everything is done, or fails what is left with `WEBVIEW_TIMEOUT` after 30 s. For tools and
-    /// tests; a game polls from its frame loop instead.
+    /// Blocks until everything is done. After 15 s it gives up and fails what is left: `WEBVIEW_UNAVAILABLE` if the
+    /// webview never came up, `WEBVIEW_TIMEOUT` if it did and an answer never arrived. For tools and tests; a game
+    /// polls from its frame loop instead.
     pub fn wait(&mut self) {
-        for _ in 0..30_000 {
-            if self.done() {
-                return;
+        let t0 = platform::now();
+        while !self.done() {
+            if platform::now() - t0 > 15.0 {
+                let up = self
+                    .view
+                    .as_ref()
+                    .is_some_and(|v| v.inbox.state == State::Ready);
+                return self.fail_all(if up {
+                    WEBVIEW_TIMEOUT
+                } else {
+                    WEBVIEW_UNAVAILABLE
+                });
             }
             self.poll();
             platform::sleep_ms(1);
         }
-        self.fail_all(WEBVIEW_TIMEOUT);
     }
 }
 
