@@ -79,3 +79,6 @@ jobs:
           name: bundle-${{ matrix.target }}
           path: target/bundle
           if-no-files-found: error
+
+      - name: Download link in run summary
+        run: echo "[bundle-${{ matrix.target }}](https://nightly.link/${{ github.repository }}/actions/runs/${{ github.run_id }}/bundle-${{ matrix.target }}.zip)" >> "$GITHUB_STEP_SUMMARY"
