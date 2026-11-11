@@ -41,7 +41,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y spirv-tools libvulkan1 libxcb1 zip \
-            libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+            libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.1-dev \
+            upx-ucl
 
       - name: Build sstrip
         if: runner.os == 'Linux'
@@ -49,6 +50,10 @@ jobs:
           git clone --depth 1 https://github.com/BR903/ELFkickers
           make -C ELFkickers
           sudo install -m755 "$(find ELFkickers -name sstrip -type f -perm -u+x | head -1)" /usr/local/bin/sstrip
+
+      - name: Install UPX
+        if: runner.os == 'Windows'
+        run: choco install upx -y --no-progress
 
       - name: Signing setup
         if: runner.os == 'Windows'

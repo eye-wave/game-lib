@@ -14,6 +14,7 @@ build app="example-3d":
     cargo build --release -p {{ quote(app) }} --target {{ target }} {{ extra }}
     if [ "{{ os_family() }}" = "windows" ]; then \
         llvm-strip --strip-all "target/{{ target }}/release/{{ app }}{{ exe }}" || true; \
+        if command -v upx >/dev/null; then upx --best --lzma -q "target/{{ target }}/release/{{ app }}{{ exe }}"; fi; \
         [ ${#STUB} -le 39 ]; \
         perl -0777 -pi -e 'BEGIN { $s = sprintf("%-39s", $ENV{STUB}) } s/This program cannot be run in DOS mode\./$s/' \
             "target/{{ target }}/release/{{ app }}{{ exe }}"; \
@@ -27,6 +28,7 @@ build app="example-3d":
             -R .eh_frame_hdr \
             "target/{{ target }}/release/{{ app }}{{ exe }}" 2>/dev/null || true; \
         sstrip "target/{{ target }}/release/{{ app }}{{ exe }}" || true; \
+        if command -v upx >/dev/null; then upx --best --ultra-brute --no-owner --no-time -q "target/{{ target }}/release/{{ app }}{{ exe }}"; fi; \
     fi
 
 app name:
