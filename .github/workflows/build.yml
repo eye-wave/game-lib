@@ -81,4 +81,44 @@ jobs:
           if-no-files-found: error
 
       - name: Download link in run summary
+        shell: bash
         run: echo "[bundle-${{ matrix.target }}](https://nightly.link/${{ github.repository }}/actions/runs/${{ github.run_id }}/bundle-${{ matrix.target }}.zip)" >> "$GITHUB_STEP_SUMMARY"
+
+  readme:
+    needs: build
+    if: github.event_name == 'push' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Update README table
+        env:
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          e = os.environ
+          base = f"https://nightly.link/{e['REPO']}/workflows/build/{e['BRANCH']}"
+          rows = [("Windows", "x86_64-pc-windows-msvc"), ("Linux", "x86_64-unknown-linux-gnu")]
+          t = "| Platform | Download | Commit |\n|---|---|---|\n"
+          for name, tgt in rows:
+              t += f"| {name} | [bundle-{tgt}.zip]({base}/bundle-{tgt}.zip) | `{e['SHA'][:7]}` |\n"
+          block = f"<!-- builds:start -->\n{t}<!-- builds:end -->"
+          s = open("README.md").read() if os.path.exists("README.md") else ""
+          pat = re.compile(r"<!-- builds:start -->.*?<!-- builds:end -->", re.S)
+          s = pat.sub(lambda _: block, s) if pat.search(s) else s.rstrip("\n") + "\n\n" + block + "\n"
+          open("README.md", "w").write(s)
+          PY
+
+      - name: Commit
+        run: |
+          git diff --quiet README.md && exit 0
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git commit -m "Update build links [skip ci]" README.md
+          git pull --rebase
+          git push
