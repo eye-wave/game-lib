@@ -13,7 +13,7 @@ const KEYS: [u8; 12] = [
     KeyA, KeyW, KeyS, KeyE, KeyD, KeyF, KeyT, KeyG, KeyY, KeyH, KeyU, KeyJ,
 ];
 fn hz(n: usize) -> f32 {
-    261.63 * (n as f32 / 12.0).exp2() // equal temperament from C4
+    261.63 * (n as f32 / 12.0).exp2()
 }
 const X: [f32; 12] = [0.5, 1.0, 1.5, 2.0, 2.5, 3.5, 4.0, 4.5, 5.0, 5.5, 6.0, 6.5]; // white keys are 1 wide
 const fn black(n: usize) -> bool {

@@ -50,7 +50,23 @@ jobs:
           make -C ELFkickers
           sudo install -m755 "$(find ELFkickers -name sstrip -type f -perm -u+x | head -1)" /usr/local/bin/sstrip
 
+      - name: Signing setup
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          PFX_B64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+        run: |
+          if [ -n "$PFX_B64" ]; then
+            echo "$PFX_B64" | base64 -d > "$RUNNER_TEMP/cert.pfx"
+            echo "PFX=$(cygpath -w "$RUNNER_TEMP/cert.pfx")" >> "$GITHUB_ENV"
+
+            sdk="$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin/"*/x64 | sort -V | tail -1)"
+            echo "$(cygpath -w "$sdk")" >> "$GITHUB_PATH"
+          fi
+
       - name: Build bundle
+        env:
+          PFX_PASS: ${{ secrets.WINDOWS_PFX_PASSWORD }}
         run: just bundle
 
       - uses: actions/upload-artifact@v7

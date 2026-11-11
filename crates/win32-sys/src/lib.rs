@@ -124,10 +124,10 @@ pub fn embed_manifest(path: Option<&str>) {
         {
             let name = std::env::var("CARGO_PKG_NAME").unwrap();
             let mut res = winresource::WindowsResource::new();
-            res.set("CompanyName", "YOUR NAME")
+            res.set("CompanyName", "_eyewave")
                 .set("FileDescription", &name)
                 .set("ProductName", &name)
-                .set("LegalCopyright", "Copyright (c) YOUR NAME")
+                .set("LegalCopyright", "Copyright (c) _eyewave")
                 .set("OriginalFilename", &(name + ".exe"));
             match path {
                 Some(p) => {
