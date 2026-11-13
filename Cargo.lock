@@ -214,6 +214,9 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 [[package]]
 name = "math"
 version = "0.1.0"
+dependencies = [
+ "paste",
+]
 
 [[package]]
 name = "media"
@@ -297,6 +300,12 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "piano"
@@ -455,6 +464,7 @@ dependencies = [
  "ecs",
  "gfx",
  "math",
+ "media",
  "platform",
  "shader",
  "win32-sys",

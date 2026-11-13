@@ -8,12 +8,16 @@ edition = "2024"
 ecs = { path = "../../crates/ecs" }
 gfx = { path = "../../crates/gfx", default-features = false, features = [
   "aa",
+  "cam2d",
   "cam3d",
   "cull",
   "fixed_input",
   "lit",
   "mouse",
+  "multicam",
+  "text",
 ] }
+media = { path = "../../crates/media", default-features = false, features = ["font"] } # webview-drawn glyph grid + layout
 math = { path = "../../crates/math" }
 platform = { path = "../../crates/platform", features = ["rt"] }
 shader = { path = "../../crates/shader" }

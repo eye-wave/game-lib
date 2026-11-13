@@ -5,6 +5,8 @@ extern crate alloc;
 
 use core::f32::consts::{FRAC_1_SQRT_2, PI, TAU};
 
+mod hud;
+
 use alloc::{vec, vec::Vec};
 use ecs::{App, Schedule::*, World};
 use gfx::{
@@ -729,6 +731,8 @@ fn game() {
         .add_system(Fixed, collide)
         .add_system(Update, interact)
         .add_system(Update, follow);
+    app.world.spawn_with((Camera3d::default(),)); // the engine only auto-spawns one when the app has no camera
+    hud::add(&mut app);
     app.world.insert_resource(MouseCapture(true));
     app.run(c"3d game");
 }

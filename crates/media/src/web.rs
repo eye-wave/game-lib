@@ -32,7 +32,7 @@ pub const POST: &str = "<script>var p=m=>chrome.webview.postMessage(m),";
 const COMMON: &str = r#"T={},n="N",G=async(t,e)=>{if(!(e=await fetch(B+"a/"+e)).ok)throw n;return e.blob()},R=(t,e,o,r,a)=>fetch(B+"r/"+t+"/"+e+"/"+o+"/"+r,{method:"POST",body:a}),g=async(o,s,r,t)=>{try{await T[s](o,r,t)}catch(a){p(o+(a==n?":N":":E"))}};"#;
 
 #[cfg(feature = "image")]
-const IMG: &str = r#"I=(e,c,w,h)=>R(e,"img",w,h,c.getImageData(0,0,w,h).data);T.i=async(e,a)=>{var i=await createImageBitmap(await G(e,a)),t=i.width,r=i.height;var n=new OffscreenCanvas(t,r).getContext("2d");n.drawImage(i,0,0),await I(e,n,t,r)};"#;
+const IMG: &str = r#"T.i=async(e,a)=>{var v=new VideoFrame(await createImageBitmap(await G(e,a)),{timestamp:0});try{var f=v.format,c=new Uint8Array(v.allocationSize());await v.copyTo(c);for(var j=0,t;j<c.length;j+=4){if(f[0]=="B")t=c[j],c[j]=c[j+2],c[j+2]=t;if(f[3]=="X")c[j+3]=255}await R(e,"img",v.codedWidth,v.codedHeight,c)}finally{v.close()}};"#;
 
 #[cfg(feature = "audio")]
 // Offline context: no audio device. decodeAudioData resamples to the context rate (48 kHz).
