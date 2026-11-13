@@ -57,7 +57,8 @@ pub struct Arena {
     buf: Vec<Chunk>,
     used: usize, // bump pointer in bytes
     slots: Vec<Slot>,
-    free: Vec<u32>, // free slot ids
+    free: Vec<u32>,                   // free slot ids
+    holes: Vec<(TypeId, Vec<usize>)>, // freed byte offsets per type (same type => same size/align)
     // Arena holds arbitrary T (maybe !Send, e.g. Rc) as raw bytes: opt out of auto Send/Sync.
     _not_send: PhantomData<*const ()>,
 }
@@ -73,7 +74,7 @@ impl Arena {
         self.buf.as_mut_ptr().cast()
     }
 
-    // pure bump allocation; freed holes are only reclaimed by compact().
+    // Reuses a freed hole of the same type, else bumps; compact() closes whatever is left.
     // Non-generic on purpose: one copy of this code instead of one per component type.
     #[inline(never)]
     fn alloc(
@@ -87,12 +88,20 @@ impl Arena {
             align <= ALIGN,
             "component alignment above {ALIGN} unsupported"
         );
-        let offset = self.used.next_multiple_of(align);
-        self.used = offset + size;
-        let need = self.used.div_ceil(ALIGN);
-        if need > self.buf.len() {
-            self.buf.resize(need, Chunk([0; ALIGN])); // may move the buffer: fine, we hold &mut self
-        }
+        let hole = self
+            .holes
+            .iter_mut()
+            .find(|h| h.0 == ty)
+            .and_then(|h| h.1.pop());
+        let offset = hole.unwrap_or_else(|| {
+            let offset = self.used.next_multiple_of(align);
+            self.used = offset + size;
+            let need = self.used.div_ceil(ALIGN);
+            if need > self.buf.len() {
+                self.buf.resize(need, Chunk([0; ALIGN])); // may move the buffer: fine, we hold &mut self
+            }
+            offset
+        });
         let slot = Slot {
             offset,
             size,
@@ -156,7 +165,12 @@ impl Arena {
         let s = &mut self.slots[id as usize];
         s.live = false;
         s.generation = s.generation.wrapping_add(1); // invalidates outstanding handles
+        let (ty, off) = (s.ty, s.offset);
         self.free.push(id);
+        match self.holes.iter_mut().find(|h| h.0 == ty) {
+            Some(h) => h.1.push(off),
+            None => self.holes.push((ty, vec![off])),
+        }
     }
 
     /// Move the value out and free its slot.
@@ -195,6 +209,7 @@ impl Arena {
             cur = off + s.size;
         }
         self.used = cur;
+        self.holes.clear(); // offsets just moved
         self.buf.truncate(cur.div_ceil(ALIGN));
         self.buf.shrink_to_fit();
     }
@@ -214,7 +229,7 @@ impl Drop for Arena {
 
 struct EntitySlot {
     generation: u32,
-    comps: Vec<(TypeId, Handle)>, // entity -> component index
+    comps: Vec<(TypeId, Handle, u32)>, // entity -> (type, handle, position in that type's index list)
     mask: u64, // bit i set <=> entity has the type at self.index[i]; types past 64 use the scan
 }
 
@@ -412,9 +427,9 @@ impl World {
         if !self.alive(e) {
             return false;
         }
-        for (ty, h) in mem::take(&mut self.ents[e.idx as usize].comps) {
+        for (ty, h, pos) in mem::take(&mut self.ents[e.idx as usize].comps) {
             self.arena.drop_slot(h);
-            self.unindex(e, ty);
+            self.unindex(e, ty, pos);
         }
         let s = &mut self.ents[e.idx as usize];
         s.generation = s.generation.wrapping_add(1);
@@ -447,8 +462,9 @@ impl World {
                 self.index.len() - 1
             }
         };
+        let pos = self.index[i].1.len() as u32;
         self.index[i].1.push((e, h));
-        self.ents[e.idx as usize].comps.push((ty, h));
+        self.ents[e.idx as usize].comps.push((ty, h, pos));
         if i < 64 {
             self.ents[e.idx as usize].mask |= 1 << i;
         }
@@ -519,7 +535,9 @@ impl World {
 
     #[inline(never)]
     fn detach(&mut self, e: Entity, ty: TypeId) {
-        self.ents[e.idx as usize].comps.retain(|c| c.0 != ty);
+        let comps = &mut self.ents[e.idx as usize].comps;
+        let at = comps.iter().position(|c| c.0 == ty).expect("attached");
+        let pos = comps.swap_remove(at).2;
         if let Some(i) = self
             .index
             .iter()
@@ -528,7 +546,7 @@ impl World {
         {
             self.ents[e.idx as usize].mask &= !(1 << i);
         }
-        self.unindex(e, ty);
+        self.unindex(e, ty, pos);
     }
 
     #[inline(never)]
@@ -540,16 +558,23 @@ impl World {
         s.comps.iter().find(|c| c.0 == ty).map(|c| c.1)
     }
 
-    // O(n) position scan per removal; store the index position if removal gets hot.
-    fn unindex(&mut self, e: Entity, ty: TypeId) {
+    // O(1): swap_remove at the stored position, then tell the owner that got moved into the gap.
+    fn unindex(&mut self, e: Entity, ty: TypeId, pos: u32) {
         let v = &mut self
             .index
             .iter_mut()
             .find(|x| x.0 == ty)
             .expect("registered")
             .1;
-        let i = v.iter().position(|x| x.0 == e).expect("indexed");
-        v.swap_remove(i);
+        debug_assert_eq!(v[pos as usize].0, e);
+        v.swap_remove(pos as usize);
+        if let Some(&(m, _)) = v.get(pos as usize) {
+            let c = self.ents[m.idx as usize]
+                .comps
+                .iter_mut()
+                .find(|c| c.0 == ty);
+            c.expect("moved owner has the component").2 = pos;
+        }
     }
 }
 
@@ -694,5 +719,51 @@ mod tests {
         assert_eq!((w.get::<u32>(e), w.get::<f32>(e)), (Some(&2), Some(&3.0)));
         assert!(w.getn_mut::<(u32, u32)>(e).is_none()); // would alias
         assert!(w.getn_mut::<(u32, u8)>(e).is_none()); // missing component
+    }
+
+    #[test]
+    fn churn_reuses_holes_and_index_survives_swap_remove() {
+        let mut w = World::default();
+        let es: Vec<Entity> = (0..100u32).map(|i| w.spawn_with((i, i as f32))).collect();
+        for &e in &es {
+            w.insert(e, 0u8);
+        }
+        let full = w.arena_bytes();
+        for _ in 0..10 {
+            for &e in &es {
+                w.remove::<u8>(e);
+            }
+            for &e in &es {
+                w.insert(e, 1u8);
+            }
+        }
+        assert_eq!(w.arena_bytes(), full); // toggling a component no longer grows the arena
+
+        let mut keep = Vec::new();
+        for (i, &e) in es.iter().enumerate() {
+            if i % 3 == 0 {
+                w.despawn(e);
+            } else {
+                if i % 5 == 0 {
+                    w.remove::<f32>(e);
+                }
+                keep.push((i as u32, e));
+            }
+        }
+        let mut got: Vec<u32> = w
+            .query_of::<(u32,)>()
+            .iter()
+            .map(|&e| *w.get::<u32>(e).unwrap())
+            .collect();
+        got.sort();
+        assert_eq!(got, keep.iter().map(|k| k.0).collect::<Vec<_>>());
+        assert_eq!(
+            w.query_of::<(f32,)>().len(),
+            keep.iter().filter(|k| k.0 % 5 != 0).count()
+        );
+        for &(_, e) in &keep {
+            w.despawn(e); // debug_assert in unindex trips on any stale position
+        }
+        assert!(w.query_of::<(u32,)>().is_empty());
     }
 }

@@ -1,3 +1,4 @@
+
 [package]
 name = "bitmap-font-example"
 version = "0.1.0"
@@ -10,7 +11,9 @@ gfx = { path = "../../crates/gfx", default-features = false, features = [
   "text",
   "aa",
 ] }
-media = { path = "../../crates/media", default-features = false, features = ["image"] } # pixel font: layout only, no sound or TTF decoder
+media = { path = "../../crates/media", default-features = false, features = [
+  "image",
+] } # pixel font: layout only, no sound or TTF decoder
 platform = { path = "../../crates/platform", features = ["rt"] }
 
 [build-dependencies]

@@ -2,7 +2,9 @@
 //! `Material::flat` lives in `cam2d.rs` and `Material::lit` in `lit.rs`.
 use alloc::vec::Vec;
 use ash::vk;
-use core::{marker::PhantomData, ptr, slice};
+#[cfg(feature = "cull")]
+use core::ptr;
+use core::{marker::PhantomData, slice};
 use shader::Align4;
 
 /// Typed index into `Assets<T>`; it is the component you put on entities.
@@ -32,6 +34,7 @@ impl<T> Assets<T> {
 pub struct Mesh {
     pub(crate) data: Vec<u8>,
     pub(crate) count: u32,
+    #[cfg(feature = "cull")]
     pub(crate) radius2: f32, // squared bounding radius around the origin, for culling
 }
 impl Mesh {
@@ -39,6 +42,8 @@ impl Mesh {
     pub fn new<V>(verts: &[V]) -> Self {
         let bytes =
             unsafe { slice::from_raw_parts(verts.as_ptr().cast::<u8>(), size_of_val(verts)) };
+
+        #[cfg(feature = "cull")]
         let radius2 = verts
             .iter()
             .map(|v| unsafe {
@@ -49,8 +54,19 @@ impl Mesh {
         Self {
             data: bytes.to_vec(),
             count: verts.len() as u32,
+            #[cfg(feature = "cull")]
             radius2,
         }
+    }
+
+    #[cfg(feature = "cull")]
+    pub(crate) fn radius2(&self) -> f32 {
+        self.radius2
+    }
+
+    #[cfg(not(feature = "cull"))]
+    pub(crate) fn radius2(&self) -> f32 {
+        0.0
     }
 }
 

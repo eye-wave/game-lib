@@ -41,7 +41,7 @@ const AUD: &str = r#"T.a=async(e,a)=>{var t=await new OfflineAudioContext(2,1,48
 #[cfg(feature = "font")]
 // Font file -> glyph grid image (reply `img`). `head` is `<px>\n<chars>\n`; the grid has 16 cells per row
 // (font.rs `COLS`), each as wide as the widest glyph and as tall as the font's ascent + descent.
-const FNT: &str = r#"T.f=async(e,t,a)=>{var[n,o]=decodeURIComponent(a).split("\n"),f=[...o],i=new FontFace("f",await(await G(e,t)).arrayBuffer());await i.load(),document.fonts.add(i);const h=new OffscreenCanvas(1,1),r=h.getContext("2d",{willReadFrequently:!0}),d=(r.font=n+"px f",r.measureText("Mg")),g=d.fontBoundingBoxAscent,s=Math.ceil(Math.max(...f.map(t=>r.measureText(t).width))),w=Math.ceil(g+d.fontBoundingBoxDescent);var l=16*s,c=w*((f.length+15)/16|0);h.width=l,h.height=c,r.font=n+"px f",r.fillStyle="\#fff",f.forEach((t,e)=>r.fillText(t,e%16*s,Math.floor(e/16)*w+g)),await I(e,r,l,c)};"#;
+const FNT: &str = r#"T.f=async(e,t,a)=>{var[n,o]=decodeURIComponent(a).split("\n"),f=[...o],i=new FontFace("f",await(await G(e,t)).arrayBuffer());await i.load(),document.fonts.add(i);const h=new OffscreenCanvas(1,1),r=h.getContext("2d",{willReadFrequently:!0}),d=(r.font=n+"px f",r.measureText("Mg")),g=d.fontBoundingBoxAscent,s=Math.ceil(Math.max(...f.map(t=>r.measureText(t).width))),w=Math.ceil(g+d.fontBoundingBoxDescent);h.width=16*s,h.height=w*((f.length+15)/16|0),r.font=n+"px f",r.fillStyle="\#fff",f.forEach((t,e)=>r.fillText(t,e%16*s,Math.floor(e/16)*w+g));await R(e,"img",h.width,h.height,r.getImageData(0,0,h.width,h.height).data)};"#;
 
 /// The page script: `BASE`, the shared helpers plus the decoders of the enabled features.
 pub fn page() -> String {

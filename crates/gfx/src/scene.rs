@@ -153,7 +153,7 @@ impl Scene {
             fr.input.ptr.cast::<Inst>().add(dst).write(Inst {
                 a: [t.pos.x, t.pos.y, t.pos.z, t.yaw],
                 s: [t.scale.x, t.scale.y, t.scale.z, g as f32],
-                color: [tint[0], tint[1], tint[2], meshes.0[mi].radius2],
+                color: [tint[0], tint[1], tint[2], meshes.0[mi].radius2()],
             });
             n += 1;
         }
