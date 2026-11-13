@@ -18,6 +18,8 @@ use vulkan_sys::*;
 
 pub(crate) const GROUPS: usize = 16; // distinct (mesh, material) pairs drawn per frame
 pub(crate) const CAP: usize = 4096; // instances per group; must match cull.wgsl
+#[cfg(feature = "ranges")]
+const MAX_RANGES: usize = 1024; // `Mesh::ranges` drawn per (camera, group); extra ones are dropped
 
 /// One drawable, as the culling shader and the vertex shader read it (std430: 3 x vec4).
 #[repr(C)]
@@ -32,6 +34,8 @@ pub(crate) struct Inst {
 pub(crate) struct Frame {
     pub input: Buf, // every drawable, written by the CPU
     pub draws: Buf, // one VkDrawIndirectCommand per group and camera; culling fills in instanceCount
+    #[cfg(feature = "ranges")]
+    pub ranges: Buf, // per camera and group, the draw commands of a `Mesh::ranges` mesh
 }
 impl Frame {
     pub unsafe fn new(c: &Ctx) -> Self {
@@ -49,6 +53,13 @@ impl Frame {
                 c,
                 (MAX_CAMERAS * GROUPS * size_of::<[u32; 4]>()) as u64,
                 storage | vk::BufferUsageFlags::INDIRECT_BUFFER,
+                true,
+            ),
+            #[cfg(feature = "ranges")]
+            ranges: make_buffer(
+                c,
+                (MAX_CAMERAS * GROUPS * MAX_RANGES * size_of::<[u32; 4]>()) as u64,
+                vk::BufferUsageFlags::INDIRECT_BUFFER,
                 true,
             ),
         }
@@ -264,6 +275,7 @@ impl Scene {
         let layout = self.layout;
         let fmt = p.sc.draw_format();
         let mats = p.app.world.resource::<Assets<Material>>().unwrap();
+        let meshes = p.app.world.resource::<Assets<Mesh>>().unwrap();
         let area = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent: ext,
@@ -352,6 +364,25 @@ impl Scene {
             let bufs = [m.buf, inst_buf];
             let offs = [0, inst_off];
             vkCmdBindVertexBuffers(cmd, 0, 2, bufs.as_ptr(), offs.as_ptr());
+            // `Mesh::ranges`: one command per range in a single multi-draw, written now and read by the GPU after
+            // submit; `slice` keeps cameras and groups apart
+            #[cfg(feature = "ranges")]
+            {
+                let ranges = &meshes.0[mi].ranges;
+                if !ranges.is_empty() {
+                    let first = slice * MAX_RANGES;
+                    let cmds = p.fr.ranges.ptr.cast::<[u32; 4]>().add(first);
+                    let n = ranges.len().min(MAX_RANGES);
+                    for (i, r) in ranges.iter().take(n).enumerate() {
+                        cmds.add(i).write([r[1], 1, r[0], 0]);
+                    }
+                    if n > 0 {
+                        let off = (first * size_of::<[u32; 4]>()) as u64;
+                        vkCmdDrawIndirect(cmd, p.fr.ranges.buf, off, n as u32, 16);
+                    }
+                    continue;
+                }
+            }
             vkCmdDrawIndirect(
                 cmd,
                 p.fr.draws.buf,
@@ -398,6 +429,11 @@ unsafe fn make_pipeline(
             .stride(size_of::<Inst>() as u32)
             .input_rate(vk::VertexInputRate::INSTANCE),
     ];
+    let topology = if m.strip {
+        vk::PrimitiveTopology::TRIANGLE_STRIP
+    } else {
+        vk::PrimitiveTopology::TRIANGLE_LIST
+    };
     let mut offset = 0;
     let mut attrs: Vec<_> = m
         .attrs
@@ -409,7 +445,7 @@ unsafe fn make_pipeline(
                 .format(f)
                 .offset(offset);
             offset += match f {
-                vk::Format::R32_SFLOAT => 4,
+                vk::Format::R32_SFLOAT | vk::Format::R16G16_SNORM => 4,
                 vk::Format::R32G32_SFLOAT => 8,
                 vk::Format::R32G32B32_SFLOAT => 12,
                 vk::Format::R32G32B32A32_SFLOAT => 16,
@@ -438,6 +474,7 @@ unsafe fn make_pipeline(
         true,
         m.blend,
         SAMPLES,
+        topology,
         &vertex_input,
     )
 }

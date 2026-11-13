@@ -21,6 +21,7 @@ default = ["cam2d", "multicam", "post", "mouse", "fixed_input", "lit"]
 cam2d = []
 cam3d = []
 cull = []
+ranges = [] # `Mesh::ranges`: draw a changing subset of a mesh's vertex ranges in one multi-draw (needs `multiDrawIndirect`)
 multicam = []
 post = []
 mouse = []

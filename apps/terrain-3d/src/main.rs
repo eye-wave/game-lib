@@ -3,15 +3,15 @@
 
 extern crate alloc;
 
-use core::f32::consts::{FRAC_1_SQRT_2, PI, TAU};
-
 mod hud;
+
+use core::f32::consts::{FRAC_1_SQRT_2, FRAC_PI_2, PI, TAU};
 
 use alloc::{vec, vec::Vec};
 use ecs::{App, Schedule::*, World};
 use gfx::{
     Assets, Camera3d, Color, FixedInput, Handle, Input, Material, Mesh, MouseCapture, RunExt,
-    Transform, Vertex,
+    Transform, Vertex, vk,
 };
 use math::{FloatExt, Vec3};
 use platform::input::{KeyA, KeyD, KeyE, KeyS, KeyW, Space};
@@ -19,9 +19,15 @@ use shader::{Align4, include_shader};
 
 static LIT: &Align4<[u8]> = include_shader!("lit");
 static TEX: &Align4<[u8]> = include_shader!("tex"); // lit + procedural checker
+static TERRAIN: &Align4<[u8]> = include_shader!("terrain"); // chunked strips, see terrain.wgsl
 
-const N: usize = 96; // terrain cells per side
-const CELL: f32 = 1.5; // cell size
+// The terrain consts below (C, CHUNKS, CELL, HMAX) are repeated at the top of terrain.wgsl: change both.
+const C: usize = 32; // cells per chunk side
+const CHUNKS: usize = 15; // chunks per side
+const N: usize = C * CHUNKS; // terrain cells per side
+const CELL: f32 = 0.3; // cell size
+const ROW: usize = 2 * C + 4; // vertices per strip row: 2 * (C + 1), plus 2 joiners
+const PER: usize = C * ROW - 2; // vertices per chunk (the last row has no joiners)
 const HALF: f32 = N as f32 * CELL * 0.5;
 const HMAX: f32 = 12.0; // rough height range of the hills
 const FREQ: f32 = 0.03; // noise frequency of the first octave, per world unit (hill width ~ 1/FREQ)
@@ -33,9 +39,9 @@ const BX: f32 = 0.0;
 const BZ: f32 = -24.0;
 const BIG: f32 = 12.0; // footprint
 const BIG_H: f32 = 8.0; // height above the door
-const RW: i32 = 20; // room size in voxels (1 unit each)
-const RH: i32 = 8;
-const RD: i32 = 20;
+const RW: i32 = 80; // room size in voxels (1 unit each)
+const RH: i32 = 24;
+const RD: i32 = 80;
 const DOOR_REACH: f32 = 3.5;
 
 const RADIUS: f32 = 0.4; // capsule
@@ -44,6 +50,7 @@ const CAM_DIST: f32 = 7.0;
 const CAM_LOOK_AT: f32 = 1.2; // height above the feet the camera orbits
 const SENSITIVITY: f32 = 0.001;
 
+const STICK: f32 = 0.5; // walking down a slope you stay on the ground while it is at most this far below
 const JUMP_SLACK: f32 = 0.5; // you can still jump this far above the ground, once per airtime
 const GRAVITY: f32 = 30.0;
 const JUMP_FORCE: f32 = 12.0;
@@ -76,6 +83,7 @@ struct Shared {
     cube: Handle<Mesh>,
     plain: Handle<Material>,
     tex: Handle<Material>,
+    terrain: Handle<Material>,
     seed: u32,
 }
 struct Solid; // axis-aligned cube that blocks the player
@@ -177,6 +185,23 @@ impl Room {
     }
 }
 
+/// A terrain chunk: its vertex range in the mesh and a bounding sphere, for `cull_chunks`.
+struct Bound {
+    first: u32,
+    count: u32,
+    center: [f32; 3],
+    radius: f32,
+}
+struct Bounds(Vec<Bound>);
+
+/// 8 bytes per terrain vertex: the height and the normal as yaw / pitch angles (snorm16). No x, z, color.
+#[repr(C)]
+struct TerrainVertex {
+    h: f32,
+    yaw: i16,
+    pitch: i16,
+}
+
 /// (N+1)^2 random heights on a regular grid. Height lookup is O(1): index the cell, interpolate its triangle.
 struct Terrain(Vec<f32>);
 
@@ -227,31 +252,68 @@ impl Terrain {
         }
     }
 
-    /// Smooth-shaded triangles: each grid point gets a normal from its neighbours' height difference (central
-    /// difference) and a color from its height, so lighting blends across triangles.
-    fn mesh(&self) -> Mesh {
+    /// Smooth-shaded terrain as `CHUNKS` x `CHUNKS` chunks of `C` x `C` cells, each a range of triangle
+    /// strips: one strip per grid row, `(0,j) (0,j+1) (1,j) (1,j+1) ... (C,j+1)`, so after the first triangle every
+    /// vertex adds one triangle. Strips are joined by repeating the last and the next first vertex (degenerate
+    /// triangles). A vertex is just a height and a normal (central difference of the neighbours' heights); terrain.wgsl
+    /// rebuilds x and z from the vertex index and the color from the height. Cell triangles are the same two as `at`.
+    fn mesh(&self) -> (Mesh, Vec<Bound>) {
         let vertex = |i: usize, j: usize| {
-            let h = self.h(i, j);
             let dx = self.h((i + 1).min(N), j) - self.h(i.saturating_sub(1), j);
             let dz = self.h(i, (j + 1).min(N)) - self.h(i, j.saturating_sub(1));
             let w = if i == 0 || i == N { CELL } else { 2.0 * CELL };
             let wz = if j == 0 || j == N { CELL } else { 2.0 * CELL };
-            let k = h / HMAX;
-            Vertex {
-                pos: Vec3::new(i as f32 * CELL - HALF, h, j as f32 * CELL - HALF),
-                normal: Vec3::new(-dx / w, 1.0, -dz / wz).normalize_or_zero(),
-                color: Vec3::new(0.25 + 0.5 * k, 0.6 - 0.2 * k, 0.2 + 0.2 * k),
+            let n = Vec3::new(-dx / w, 1.0, -dz / wz).normalize_or_zero();
+            let snorm = |a: f32, range: f32| (a / range * 32767.0) as i16;
+            TerrainVertex {
+                h: self.h(i, j),
+                yaw: snorm(n.x.atan2(n.z), PI),
+                pitch: snorm(n.y.clamp(-1.0, 1.0).asin(), FRAC_PI_2),
             }
         };
-        let mut v = Vec::new();
-        for j in 0..N {
-            for i in 0..N {
-                for t in [[(0, 0), (1, 0), (0, 1)], [(1, 0), (1, 1), (0, 1)]] {
-                    v.extend(t.map(|(di, dj)| vertex(i + di, j + dj)));
+        let (mut v, mut bounds) = (Vec::with_capacity(CHUNKS * CHUNKS * PER), Vec::new());
+        for cz in 0..CHUNKS {
+            for cx in 0..CHUNKS {
+                let (i0, j0, first) = (cx * C, cz * C, v.len());
+                for row in 0..C {
+                    for t in 0..2 * (C + 1) {
+                        v.push(vertex(i0 + t / 2, j0 + row + t % 2));
+                    }
+                    if row + 1 < C {
+                        v.push(vertex(i0 + C, j0 + row + 1)); // joiners
+                        v.push(vertex(i0, j0 + row + 1));
+                    }
                 }
+                debug_assert_eq!(v.len() - first, PER);
+                // bounding sphere: the chunk's footprint and its height range
+                let (mut lo, mut hi) = (f32::MAX, 0.0f32);
+                for j in j0..=j0 + C {
+                    for i in i0..=i0 + C {
+                        let h = self.h(i, j);
+                        lo = if h < lo { h } else { lo };
+                        hi = if h > hi { h } else { hi };
+                    }
+                }
+                let half = C as f32 * CELL * 0.5;
+                bounds.push(Bound {
+                    first: first as u32,
+                    count: PER as u32,
+                    center: [
+                        i0 as f32 * CELL - HALF + half,
+                        (lo + hi) * 0.5,
+                        j0 as f32 * CELL - HALF + half,
+                    ],
+                    radius: half * 1.5 + (hi - lo) * 0.5, // 1.5 >= sqrt(2)
+                });
             }
         }
-        Mesh::new(&v)
+        let top = self
+            .0
+            .iter()
+            .fold(0.0f32, |a, &b| if b > a { b } else { a });
+        let mut mesh = Mesh::with_radius2(&v, 2.0 * HALF * HALF + top * top);
+        mesh.ranges = bounds.iter().map(|b| [b.first, b.count]).collect(); // everything until `cull_chunks` runs
+        (mesh, bounds)
     }
 }
 
@@ -330,7 +392,8 @@ fn load(w: &mut World, inside: bool) -> Vec3 {
     let brown = [0.5, 0.28, 0.1];
 
     if inside {
-        // border walls, a staircase and some pillars, one cube per visible voxel
+        // border walls (six big slabs: per-voxel cubes would overflow the instance cap at this size), a staircase and
+        // some pillars (one cube per visible voxel)
         let mut room = Room(vec![false; (RW * RH * RD) as usize]);
         for y in 0..RH {
             for z in 0..RD {
@@ -340,18 +403,18 @@ fn load(w: &mut World, inside: bool) -> Vec3 {
                 }
             }
         }
-        for i in 0..4 {
+        for i in 0..8 {
             for z in 3..7 {
                 for y in 1..=1 + i {
                     room.0[Room::ix(3 + i, y, z)] = true;
                 }
             }
         }
-        for _ in 0..8 {
+        for _ in 0..(RW * RD / 50) {
             let (x, z, h) = (
-                8 + (rng.f32() * 9.0) as i32,
-                3 + (rng.f32() * 11.0) as i32,
-                1 + (rng.f32() * 3.0) as i32,
+                8 + (rng.f32() * (RW - 11) as f32) as i32,
+                3 + (rng.f32() * (RD - 9) as f32) as i32,
+                1 + (rng.f32() * 6.0) as i32,
             );
             for y in 1..=h {
                 room.0[Room::ix(x, y, z)] = true;
@@ -361,7 +424,10 @@ fn load(w: &mut World, inside: bool) -> Vec3 {
             for z in 0..RD {
                 for x in 0..RW {
                     let open = |dx, dy, dz| !room.solid(x + dx, y + dy, z + dz);
-                    if !room.solid(x, y, z)
+                    let border =
+                        x == 0 || y == 0 || z == 0 || x == RW - 1 || y == RH - 1 || z == RD - 1;
+                    if border
+                        || !room.solid(x, y, z)
                         || !(open(1, 0, 0)
                             || open(-1, 0, 0)
                             || open(0, 1, 0)
@@ -372,21 +438,33 @@ fn load(w: &mut World, inside: bool) -> Vec3 {
                         continue;
                     }
                     let g = 0.6 + 0.4 * rng.f32();
-                    let tint = if y == 0 {
-                        [0.8, 0.65, 0.45]
-                    } else {
-                        [g, g * 0.9, 1.0]
-                    };
                     spawn_cube(
                         w,
                         Transform::from_pos(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5),
                         sh.cube,
                         sh.tex,
-                        tint,
+                        [g, g * 0.9, 1.0],
                     );
                 }
             }
         }
+        // the shell: floor, ceiling and four walls, one voxel thick (tex.wgsl's checker follows world position)
+        let (fw, fh, fd) = (RW as f32, RH as f32, RD as f32);
+        let slab = |w: &mut World, c: [f32; 3], s: [f32; 3], tint: [f32; 3]| {
+            let t = Transform {
+                pos: Vec3::new(c[0], c[1], c[2]),
+                yaw: 0.0,
+                scale: Vec3::new(s[0], s[1], s[2]),
+            };
+            spawn_cube(w, t, sh.cube, sh.tex, tint);
+        };
+        let (stone, wall) = ([0.8, 0.65, 0.45], [0.8, 0.72, 1.0]);
+        slab(w, [fw / 2.0, 0.5, fd / 2.0], [fw, 1.0, fd], stone);
+        slab(w, [fw / 2.0, fh - 0.5, fd / 2.0], [fw, 1.0, fd], wall);
+        slab(w, [0.5, fh / 2.0, fd / 2.0], [1.0, fh, fd], wall);
+        slab(w, [fw - 0.5, fh / 2.0, fd / 2.0], [1.0, fh, fd], wall);
+        slab(w, [fw / 2.0, fh / 2.0, 0.5], [fw, fh, 1.0], wall);
+        slab(w, [fw / 2.0, fh / 2.0, fd - 0.5], [fw, fh, 1.0], wall);
         spawn_cube(
             w,
             door(RW as f32 * 0.5, 2.7, RD as f32 - 1.15),
@@ -399,7 +477,7 @@ fn load(w: &mut World, inside: bool) -> Vec3 {
     }
 
     let terrain = Terrain::new(sh.seed);
-    w.spawn_with((Scenery, Transform::default(), sh.ground, sh.plain));
+    w.spawn_with((Scenery, Transform::default(), sh.ground, sh.terrain));
 
     // Cubes sunk into the ground: the bottom is far below the surface so slopes never expose it.
     for _ in 0..CUBES {
@@ -469,19 +547,28 @@ fn load(w: &mut World, inside: bool) -> Vec3 {
 
 fn setup(w: &mut World, _: f32) {
     let seed = hash(platform::now() as u32 ^ 0xdead_beef);
+    let (ground_mesh, bounds) = Terrain::new(seed).mesh();
     let meshes = w.resource_mut::<Assets<Mesh>>().unwrap();
     let (ground, cube, capsule) = (
-        meshes.add(Terrain::new(seed).mesh()),
+        meshes.add(ground_mesh),
         meshes.add(cube_mesh()),
         meshes.add(capsule_mesh()),
     );
     let mats = w.resource_mut::<Assets<Material>>().unwrap();
     let (plain, tex) = (mats.add(Material::lit(LIT)), mats.add(Material::lit(TEX)));
+    let strip = Material::new(
+        TERRAIN,
+        size_of::<TerrainVertex>() as u32,
+        &[vk::Format::R32_SFLOAT, vk::Format::R16G16_SNORM],
+    );
+    let terrain = mats.add(strip.strips());
+    w.insert_resource(Bounds(bounds));
     w.insert_resource(Shared {
         ground,
         cube,
         plain,
         tex,
+        terrain,
         seed,
     });
 
@@ -581,8 +668,11 @@ fn walk(w: &mut World, dt: f32) {
                 t.pos.z = (t.pos.z + v.z * dt).clamp(-lim, lim);
                 t.pos.y += v.y * dt;
                 let ground = g.at(t.pos.x, t.pos.z);
+                // Downhill the ground drops faster than one tick of gravity: without sticking to it the player
+                // would leave it every tick, land, and restart the fall from 0 (a stepping descent).
+                let stuck = v.grounded && v.y <= 0.0 && t.pos.y - ground < STICK;
                 v.grounded = false; // collide() sets it again when we land on a cube
-                if t.pos.y <= ground {
+                if t.pos.y <= ground || stuck {
                     t.pos.y = ground;
                     v.y = v.y.max(0.0);
                     v.grounded = true;
@@ -723,16 +813,54 @@ fn follow(w: &mut World, _: f32) {
     camera(w).pos = pos;
 }
 
+/// Is the sphere outside the 3D camera's view frustum? Same conventions as gfx's `Camera3d` (forward, right and up
+/// vectors, `focal` = 1 / tan(fov / 2), depth `near`..`far`).
+fn outside(c: &Camera3d, aspect: f32, p: [f32; 3], r: f32) -> bool {
+    let (sy, cy, sp, cp) = (c.yaw.sin(), c.yaw.cos(), c.pitch.sin(), c.pitch.cos());
+    let d = [p[0] - c.pos.x, p[1] - c.pos.y, p[2] - c.pos.z];
+    let dot = |a: [f32; 3]| a[0] * d[0] + a[1] * d[1] + a[2] * d[2];
+    let z = dot([-sy * cp, sp, -cy * cp]); // distance along the view direction
+    let x = FloatExt::abs(dot([cy, 0.0, -sy]));
+    let y = FloatExt::abs(dot([sp * sy, cp, sp * cy]));
+    let (kx, ky) = (aspect / c.focal, 1.0 / c.focal); // half-extent per unit of depth
+    z < c.near - r
+        || z > c.far + r
+        || kx * z - x < -r * (1.0 + kx * kx).sqrt()
+        || ky * z - y < -r * (1.0 + ky * ky).sqrt()
+}
+
+/// The terrain draws only the chunks the 3D camera sees: one multi-draw of their vertex ranges. (Other cameras draw
+/// the same list; the HUD's just clips them away.)
+fn cull_chunks(w: &mut World, _: f32) {
+    let win = w.resource::<Input>().unwrap().window_size();
+    let cam = *camera(w);
+    let ranges: Vec<[u32; 2]> = w
+        .resource::<Bounds>()
+        .unwrap()
+        .0
+        .iter()
+        .filter(|b| !outside(&cam, win[0] / win[1], b.center, b.radius))
+        .map(|b| [b.first, b.count])
+        .collect();
+    let ground = w.resource::<Shared>().unwrap().ground;
+    w.resource_mut::<Assets<Mesh>>()
+        .unwrap()
+        .get_mut(ground)
+        .ranges = ranges;
+}
+
 fn game() {
     let mut app = App::new();
+    // spawned by hand: the HUD's Camera2d would otherwise suppress the default Camera3d
+    app.world.spawn_with((Camera3d::default(),));
+    hud::add(&mut app);
     app.add_system(Startup, setup)
         .add_system(Update, look)
         .add_system(Fixed, walk)
         .add_system(Fixed, collide)
         .add_system(Update, interact)
-        .add_system(Update, follow);
-    app.world.spawn_with((Camera3d::default(),)); // the engine only auto-spawns one when the app has no camera
-    hud::add(&mut app);
+        .add_system(Update, follow)
+        .add_system(Update, cull_chunks); // after `follow`: the camera has moved
     app.world.insert_resource(MouseCapture(true));
     app.run(c"3d game");
 }

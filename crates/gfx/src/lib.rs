@@ -12,6 +12,7 @@
 //! | `cam2d`       | `Camera2d`, `Material::flat`, `DEPTH2D`                                               | |
 //! | `cam3d`       | `Camera3d`                                                                            | (enable at least one camera feature) |
 //! | `cull`        | GPU frustum culling (`cull.wgsl`)                                                     | every instance is drawn |
+//! | `ranges`      | `Mesh::ranges`: a per-frame subset of a mesh's vertex ranges, drawn in one multi-draw  | whole meshes only |
 //! | `multicam`    | several cameras with `viewport` and `scale`                                           | one fullscreen camera, drawn straight into the output |
 //! | `post`        | `PostProcess` and the offscreen scene + fullscreen pass                               | cameras write the swapchain directly |
 //! | `mouse`       | `MouseCapture`, `Input::{mouse_delta, cursor, cursor_world, mouse_down, clicked}`     | keyboard only |

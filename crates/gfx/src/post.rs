@@ -219,6 +219,7 @@ impl Post {
                     false,
                     false,
                     vk::SampleCountFlags::TYPE_1,
+                    vk::PrimitiveTopology::TRIANGLE_LIST,
                     &vk::PipelineVertexInputStateCreateInfo::default(),
                 );
                 self.pipe = Some((shader, pl));

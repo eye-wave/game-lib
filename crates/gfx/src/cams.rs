@@ -62,7 +62,7 @@ fn add(v: &mut Vec<View>, vp: [f32; 16], sky: [f32; 3], rect: [f32; 4], scale: f
     }
 }
 
-/// 3D cameras first, then 2D (so a 2D HUD viewport draws over the 3D view); with none active a default camera is used.
+/// 3D cameras first, then 2D (so a 2D overlay such as a HUD draws over the 3D view); with none active a default camera is used.
 pub(crate) fn collect(app: &App, ew: f32, eh: f32) -> Vec<View> {
     let world = &app.world;
     let aspect = |r: [f32; 4]| (r[2] * ew) / (r[3] * eh);

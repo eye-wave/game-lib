@@ -285,7 +285,7 @@ pub(crate) unsafe fn make_buffer(
     }
 }
 
-/// Triangle-list graphics pipeline with a `vs_main` / `fs_main` module, used by scene materials and the post pass.
+/// Graphics pipeline with a `vs_main` / `fs_main` module, used by scene materials and the post pass.
 #[allow(clippy::too_many_arguments)]
 pub(crate) unsafe fn build_pipeline(
     c: &Ctx,
@@ -295,6 +295,7 @@ pub(crate) unsafe fn build_pipeline(
     depth: bool,
     blend: bool,
     samples: vk::SampleCountFlags,
+    topology: vk::PrimitiveTopology,
     vertex_input: &vk::PipelineVertexInputStateCreateInfo,
 ) -> vk::Pipeline {
     let shader = shader_module(c.device, spv);
@@ -308,8 +309,7 @@ pub(crate) unsafe fn build_pipeline(
             .module(shader)
             .name(c"fs_main"),
     ];
-    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default()
-        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(topology);
     let viewport_state = vk::PipelineViewportStateCreateInfo::default()
         .viewport_count(1)
         .scissor_count(1);

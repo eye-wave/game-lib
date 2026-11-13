@@ -50,6 +50,7 @@ pub(crate) unsafe fn create(
         .queue_family_index(qf)
         .queue_priorities(&prio)];
     let mut f13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true);
+    let feats = vk::PhysicalDeviceFeatures::default().multi_draw_indirect(cfg!(feature = "ranges")); // `Mesh::ranges`
     let dev_exts = [khr::swapchain::NAME.as_ptr()];
     let device: vk::Device = mk(CREATE_LOGICAL_DEVICE_FAILED, |p| {
         vkCreateDevice(
@@ -57,6 +58,7 @@ pub(crate) unsafe fn create(
             &vk::DeviceCreateInfo::default()
                 .queue_create_infos(&queue_info)
                 .enabled_extension_names(&dev_exts)
+                .enabled_features(&feats)
                 .push_next(&mut f13),
             NA,
             p,

@@ -4,7 +4,7 @@ use math::{FloatExt, Vec3};
 /// Component: a 3D viewpoint. Right-handed, y up; at yaw 0 and pitch 0 it looks down -z, and a positive yaw turns
 /// left. `focal` is 1 / tan(vertical fov / 2). `sky` is the clear color.
 ///
-/// With `multicam`, every active camera (3D ones first, then 2D ones, at most `MAX_CAMERAS`) renders the whole scene into its own
+/// With `multicam`, every active camera (3D ones first, then 2D, at most `MAX_CAMERAS`) renders the whole scene into its own
 /// target and is copied into `viewport` = [x, y, width, height], fractions of the window with y counted up from the
 /// bottom. Later cameras draw over earlier ones. The target is `scale` times the viewport's pixel size: below 1 it
 /// renders at a lower resolution and is upscaled with nearest filtering (big pixels), above 1 it is supersampled.
