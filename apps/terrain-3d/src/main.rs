@@ -820,8 +820,8 @@ fn outside(c: &Camera3d, aspect: f32, p: [f32; 3], r: f32) -> bool {
     let d = [p[0] - c.pos.x, p[1] - c.pos.y, p[2] - c.pos.z];
     let dot = |a: [f32; 3]| a[0] * d[0] + a[1] * d[1] + a[2] * d[2];
     let z = dot([-sy * cp, sp, -cy * cp]); // distance along the view direction
-    let x = FloatExt::abs(dot([cy, 0.0, -sy]));
-    let y = FloatExt::abs(dot([sp * sy, cp, sp * cy]));
+    let x = (dot([cy, 0.0, -sy])).abs();
+    let y = (dot([sp * sy, cp, sp * cy])).abs();
     let (kx, ky) = (aspect / c.focal, 1.0 / c.focal); // half-extent per unit of depth
     z < c.near - r
         || z > c.far + r

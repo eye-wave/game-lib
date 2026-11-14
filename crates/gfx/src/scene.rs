@@ -275,6 +275,7 @@ impl Scene {
         let layout = self.layout;
         let fmt = p.sc.draw_format();
         let mats = p.app.world.resource::<Assets<Material>>().unwrap();
+        #[cfg(feature = "ranges")]
         let meshes = p.app.world.resource::<Assets<Mesh>>().unwrap();
         let area = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },

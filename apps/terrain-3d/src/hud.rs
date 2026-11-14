@@ -6,7 +6,7 @@
 use alloc::string::ToString;
 use ecs::{App, Schedule::*, World};
 use gfx::{Assets, Atlas, Camera2d, Color, Handle, Input, Material, Mesh, Transform};
-use math::{Vec2, Vec3};
+use math::{FloatExt, Vec2, Vec3};
 use platform::die;
 
 const FAR: f32 = 1000.0;
@@ -140,7 +140,7 @@ fn update(w: &mut World, dt: f32) {
         n.fps = fps[N - 15..].iter().sum::<f32>() / 15.0; // mean of the last 15 frames
     }
     let shown = n.fps;
-    let digits = ((n.fps + 0.5) as u32).min(999).to_string(); // SLOTS digits at most; +0.5 rounds (no f32::round in no_std)
+    let digits = (n.fps.round() as u32).min(999).to_string(); // SLOTS digits at most
     let glyphs = w.resource::<Glyphs>().unwrap().0;
     for e in w.query_of::<(Digit, Handle<Mesh>, Transform)>() {
         let k = w.get::<Digit>(e).unwrap().0;

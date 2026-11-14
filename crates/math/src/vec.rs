@@ -97,7 +97,7 @@ macro_rules! vec_impl {
             #[inline]
             #[must_use]
             pub fn abs(self) -> Self {
-                Self { $($f: crate::FloatExt::abs(self.$f)),+ }
+                Self { $($f: f32::abs(self.$f)),+ }
             }
         }
 
