@@ -7,6 +7,8 @@ macro_rules! float_ext {
         ::paste::paste! {
             mod libm_sys {
                 #[cfg_attr(unix, link(name = "m"))]
+                #[cfg_attr(windows, link(name = "ucrt"))]
+                #[cfg_attr(windows, link(name = "vcruntime"))]
                 unsafe extern "C" {
                     $(
                         pub safe fn [<$uc f>](x: f32) -> f32;
